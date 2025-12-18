@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onUnmounted, watch } from 'vue'
+import { ref, onUnmounted, watch, nextTick } from 'vue'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
 
@@ -52,39 +52,54 @@ async function startCamera() {
       audio: false
     })
     
-    if (videoRef.value) {
-      videoRef.value.srcObject = stream.value
+    // Esperar a que Vue actualice el DOM
+    await nextTick()
+    
+    // Esperar un poco más para asegurar que el video esté montado
+    await new Promise(resolve => setTimeout(resolve, 100))
+    
+    if (videoRef.value && stream.value) {
+      const video = videoRef.value
+      video.srcObject = stream.value
       
-      // Esperar a que el video esté listo
-      videoRef.value.onloadedmetadata = () => {
-        videoRef.value?.play().then(() => {
-          isVideoReady.value = true
-          isLoading.value = false
-        }).catch((e) => {
-          console.error('Error playing video:', e)
-          error.value = 'Error al reproducir video. Intenta con otra cámara.'
-          isLoading.value = false
-        })
-      }
-      
-      // Timeout por si la cámara no responde
-      setTimeout(() => {
-        if (!isVideoReady.value && !error.value) {
-          error.value = 'La cámara no responde. Intenta con otra cámara o continúa sin foto.'
-          isLoading.value = false
-          stopCamera()
+      // Usar una promesa para esperar a que el video esté listo
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Timeout esperando video'))
+        }, 8000)
+        
+        video.onloadeddata = () => {
+          clearTimeout(timeout)
+          resolve()
         }
-      }, 5000)
+        
+        video.onerror = () => {
+          clearTimeout(timeout)
+          reject(new Error('Error al cargar video'))
+        }
+      })
+      
+      // Reproducir el video
+      await video.play()
+      
+      isVideoReady.value = true
+      isLoading.value = false
+    } else {
+      throw new Error('No se pudo inicializar el video')
     }
   } catch (e: unknown) {
     console.error('Camera error:', e)
+    stopCamera()
+    
     const errorMsg = e instanceof Error ? e.message : 'Error desconocido'
     if (errorMsg.includes('Permission') || errorMsg.includes('NotAllowed')) {
       error.value = 'Permiso de cámara denegado. Habilítalo en la configuración del navegador.'
     } else if (errorMsg.includes('NotFound') || errorMsg.includes('DevicesNotFound')) {
       error.value = 'No se encontró una cámara en este dispositivo.'
+    } else if (errorMsg.includes('Timeout')) {
+      error.value = 'La cámara tardó demasiado. Intenta de nuevo o continúa sin foto.'
     } else {
-      error.value = `No se pudo acceder a la cámara: ${errorMsg}`
+      error.value = `Error de cámara: ${errorMsg}`
     }
     isLoading.value = false
   }
@@ -179,49 +194,56 @@ onUnmounted(() => {
     :style="{ width: '95vw', maxWidth: '500px' }"
   >
     <div class="camera-container">
+      <!-- Video (siempre montado para que videoRef esté disponible) -->
+      <div v-show="!capturedPhoto && !error" class="video-wrapper">
+        <video 
+          ref="videoRef" 
+          autoplay 
+          playsinline
+          muted
+          :class="{ 'video-ready': isVideoReady, 'back-camera': useBackCamera }"
+        ></video>
+        <div v-if="isVideoReady" class="video-overlay">
+          <div class="face-guide"></div>
+        </div>
+        <button 
+          v-if="isVideoReady" 
+          class="switch-camera-btn" 
+          @click="toggleCamera"
+          title="Cambiar cámara"
+        >
+          <i class="pi pi-sync"></i>
+        </button>
+      </div>
+      
+      <!-- Loading overlay -->
       <div v-if="isLoading" class="camera-loading">
         <i class="pi pi-spin pi-spinner"></i>
         <p>Iniciando cámara...</p>
       </div>
       
+      <!-- Error overlay -->
       <div v-else-if="error" class="camera-error">
         <i class="pi pi-exclamation-triangle"></i>
         <p>{{ error }}</p>
+        <Button 
+          label="Reintentar" 
+          icon="pi pi-refresh"
+          severity="secondary"
+          size="small"
+          @click="startCamera"
+          class="retry-btn"
+        />
       </div>
       
-      <template v-else>
-        <div v-if="!capturedPhoto" class="video-wrapper">
-          <video 
-            ref="videoRef" 
-            autoplay 
-            playsinline
-            muted
-            :class="{ 'video-ready': isVideoReady, 'back-camera': useBackCamera }"
-          ></video>
-          <div class="video-overlay">
-            <div class="face-guide"></div>
-          </div>
-          <div v-if="!isVideoReady && !isLoading" class="video-loading">
-            <i class="pi pi-spin pi-spinner"></i>
-          </div>
-          <button 
-            v-if="isVideoReady" 
-            class="switch-camera-btn" 
-            @click="toggleCamera"
-            title="Cambiar cámara"
-          >
-            <i class="pi pi-sync"></i>
-          </button>
-        </div>
-        
-        <div v-else class="photo-preview">
-          <img 
-            :src="capturedPhoto" 
-            alt="Foto capturada" 
-            :class="{ 'back-camera': useBackCamera }"
-          />
-        </div>
-      </template>
+      <!-- Photo preview -->
+      <div v-else-if="capturedPhoto" class="photo-preview">
+        <img 
+          :src="capturedPhoto" 
+          alt="Foto capturada" 
+          :class="{ 'back-camera': useBackCamera }"
+        />
+      </div>
     </div>
 
     <template #footer>
@@ -286,6 +308,10 @@ onUnmounted(() => {
 
 .camera-error i {
   color: var(--warning);
+}
+
+.retry-btn {
+  margin-top: 1rem;
 }
 
 .video-wrapper {
