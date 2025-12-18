@@ -1,7 +1,16 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
-import type { Worker, TimeRecord, AppState, WorkerState, DaySchedule, Admin } from '../types'
+import { 
+  collection, 
+  doc, 
+  onSnapshot, 
+  setDoc, 
+  deleteDoc
+} from 'firebase/firestore'
+import type { Unsubscribe } from 'firebase/firestore'
+import { db } from '../firebase'
+import type { Worker, TimeRecord, WorkerState, DaySchedule } from '../types'
 
-const STORAGE_KEY = 'time-tracker-state'
+const ADMIN_PIN = import.meta.env.VITE_ADMIN_PIN || '1234'
 
 function createDefaultSchedule(): DaySchedule[] {
   return [
@@ -17,55 +26,6 @@ function createDefaultSchedule(): DaySchedule[] {
 
 function generateId(): string {
   return Date.now().toString(36) + Math.random().toString(36).substr(2)
-}
-
-const ADMIN_PIN = import.meta.env.VITE_ADMIN_PIN || '1234'
-
-function loadState(): AppState {
-  try {
-    const saved = localStorage.getItem(STORAGE_KEY)
-    if (saved) {
-      const parsed = JSON.parse(saved)
-      // Migration from old format
-      if (!parsed.admin) {
-        return {
-          admin: { pin: ADMIN_PIN },
-          workers: parsed.workers || [],
-          workerStates: parsed.workerStates || {}
-        }
-      }
-      // Always use env PIN for admin
-      parsed.admin.pin = ADMIN_PIN
-      
-      // Migrate workers to ensure all fields exist
-      if (parsed.workers) {
-        for (const worker of parsed.workers) {
-          if (!worker.restDays) {
-            worker.restDays = []
-          }
-          if (!worker.paymentType) {
-            worker.paymentType = 'monthly'
-          }
-          if (worker.hourlyRate === undefined) {
-            worker.hourlyRate = 0
-          }
-        }
-      }
-      
-      return parsed
-    }
-  } catch (e) {
-    console.error('Error loading state:', e)
-  }
-  return {
-    admin: { pin: ADMIN_PIN },
-    workers: [],
-    workerStates: {}
-  }
-}
-
-function saveState(state: AppState) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
 }
 
 function parseTime(timeStr: string): { hours: number; minutes: number } {
@@ -94,44 +54,77 @@ function formatTime12hWithSeconds(date: Date): string {
 }
 
 export function useTimeTracker() {
-  const state = ref<AppState>(loadState())
+  const workers = ref<Worker[]>([])
+  const workerStates = ref<Record<string, WorkerState>>({})
+  const isLoading = ref(true)
   const currentTime = ref(new Date())
+  
   let timeInterval: number | null = null
+  let unsubscribeWorkers: Unsubscribe | null = null
+  const unsubscribeStates = new Map<string, Unsubscribe>()
 
   onMounted(() => {
     timeInterval = window.setInterval(() => {
       currentTime.value = new Date()
     }, 1000)
-    checkNewDay()
+    
+    subscribeToWorkers()
   })
 
   onUnmounted(() => {
-    if (timeInterval) {
-      clearInterval(timeInterval)
-    }
+    if (timeInterval) clearInterval(timeInterval)
+    unsubscribeWorkers?.()
+    unsubscribeStates.forEach(unsub => unsub())
   })
 
-  function checkNewDay() {
-    const today = formatDate(new Date())
-    for (const workerId of Object.keys(state.value.workerStates)) {
-      const ws = state.value.workerStates[workerId]
-      if (ws?.currentDay && ws.currentDay.date !== today) {
-        if (ws.currentDay.records.length > 0) {
-          ws.history.push(ws.currentDay)
+  function subscribeToWorkers() {
+    const workersRef = collection(db, 'workers')
+    
+    unsubscribeWorkers = onSnapshot(workersRef, (snapshot) => {
+      workers.value = snapshot.docs.map(docSnap => {
+        const data = docSnap.data()
+        return {
+          id: docSnap.id,
+          name: data.name || '',
+          pin: data.pin || '',
+          paymentType: data.paymentType || 'monthly',
+          monthlySalary: data.monthlySalary || 0,
+          hourlyRate: data.hourlyRate || 0,
+          schedule: data.schedule || createDefaultSchedule(),
+          restDays: data.restDays || []
+        } as Worker
+      })
+      
+      // Subscribe to each worker's state
+      workers.value.forEach(worker => {
+        if (!unsubscribeStates.has(worker.id)) {
+          subscribeToWorkerState(worker.id)
         }
-        ws.currentDay = null
+      })
+      
+      isLoading.value = false
+    }, (error) => {
+      console.error('Error fetching workers:', error)
+      isLoading.value = false
+    })
+  }
+
+  function subscribeToWorkerState(workerId: string) {
+    const stateRef = doc(db, 'workerStates', workerId)
+    
+    const unsub = onSnapshot(stateRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data()
+        workerStates.value[workerId] = {
+          currentDay: data.currentDay || null,
+          history: data.history || []
+        }
+      } else {
+        workerStates.value[workerId] = { currentDay: null, history: [] }
       }
-    }
-    persist()
-  }
-
-  function persist() {
-    saveState(state.value)
-  }
-
-  function formatDate(date: Date): string {
-    const isoString = date.toISOString()
-    return isoString.split('T')[0] ?? isoString.substring(0, 10)
+    })
+    
+    unsubscribeStates.set(workerId, unsub)
   }
 
   const currentTimeFormatted = computed(() => formatTime12hWithSeconds(currentTime.value))
@@ -145,36 +138,36 @@ export function useTimeTracker() {
     })
   })
 
-  // Admin functions
-  function getAdmin(): Admin {
-    return state.value.admin
+  // Admin
+  function getAdmin() {
+    return { pin: ADMIN_PIN }
   }
 
-  function setAdminPin(pin: string) {
-    state.value.admin.pin = pin
-    persist()
+  function isFirstRun() {
+    return false
   }
 
-  function isFirstRun(): boolean {
-    return false // PIN viene del .env, ya no hay primera configuración
+  function setAdminPin(_pin: string) {
+    // PIN is set via environment variable
   }
 
-  // Worker management
+  // Workers
   function getWorkers(): Worker[] {
-    return state.value.workers
+    return workers.value
   }
 
   function getWorker(workerId: string): Worker | null {
-    return state.value.workers.find(w => w.id === workerId) || null
+    return workers.value.find(w => w.id === workerId) || null
   }
 
   function getWorkerState(workerId: string): WorkerState | null {
-    return state.value.workerStates[workerId] || null
+    return workerStates.value[workerId] || null
   }
 
-  function addWorker(name: string, pin: string, paymentType: 'monthly' | 'hourly' = 'monthly', amount: number = 0): Worker {
+  async function addWorker(name: string, pin: string, paymentType: 'monthly' | 'hourly' = 'monthly', amount: number = 0): Promise<Worker> {
+    const id = generateId()
     const worker: Worker = {
-      id: generateId(),
+      id,
       name,
       pin,
       paymentType,
@@ -183,45 +176,43 @@ export function useTimeTracker() {
       schedule: createDefaultSchedule(),
       restDays: []
     }
-    state.value.workers.push(worker)
-    state.value.workerStates[worker.id] = { currentDay: null, history: [] }
-    persist()
+    
+    await setDoc(doc(db, 'workers', id), worker)
+    await setDoc(doc(db, 'workerStates', id), { currentDay: null, history: [] })
+    
     return worker
   }
 
-  function updateWorker(worker: Worker) {
-    const index = state.value.workers.findIndex(w => w.id === worker.id)
-    if (index !== -1) {
-      state.value.workers[index] = worker
-      persist()
-    }
+  async function updateWorker(worker: Worker) {
+    await setDoc(doc(db, 'workers', worker.id), worker)
   }
 
-  function removeWorker(workerId: string) {
-    const index = state.value.workers.findIndex(w => w.id === workerId)
-    if (index !== -1) {
-      state.value.workers.splice(index, 1)
-      delete state.value.workerStates[workerId]
-      persist()
-    }
+  async function removeWorker(workerId: string) {
+    await deleteDoc(doc(db, 'workers', workerId))
+    await deleteDoc(doc(db, 'workerStates', workerId))
+    unsubscribeStates.get(workerId)?.()
+    unsubscribeStates.delete(workerId)
   }
 
-  // Rest days management
-  function addRestDay(workerId: string, date: string) {
-    const worker = getWorker(workerId)
-    if (worker && !worker.restDays.includes(date)) {
-      worker.restDays.push(date)
-      persist()
-    }
-  }
-
-  function removeRestDay(workerId: string, date: string) {
+  // Rest days
+  async function addRestDay(workerId: string, date: string) {
     const worker = getWorker(workerId)
     if (worker) {
+      if (!worker.restDays) worker.restDays = []
+      if (!worker.restDays.includes(date)) {
+        worker.restDays.push(date)
+        await updateWorker(worker)
+      }
+    }
+  }
+
+  async function removeRestDay(workerId: string, date: string) {
+    const worker = getWorker(workerId)
+    if (worker && worker.restDays) {
       const index = worker.restDays.indexOf(date)
       if (index !== -1) {
         worker.restDays.splice(index, 1)
-        persist()
+        await updateWorker(worker)
       }
     }
   }
@@ -230,16 +221,14 @@ export function useTimeTracker() {
     const worker = getWorker(workerId)
     if (!worker) return false
     
-    // Check explicit rest days
     if (worker.restDays?.includes(date)) return true
     
-    // Check schedule (day of week)
     const dayOfWeek = new Date(date).getDay()
     const daySchedule = worker.schedule?.[dayOfWeek]
     return !daySchedule?.active
   }
 
-  // Time tracking for a specific worker
+  // Time tracking
   function getDayStatus(workerId: string) {
     const ws = getWorkerState(workerId)
     const worker = getWorker(workerId)
@@ -330,8 +319,9 @@ export function useTimeTracker() {
     return `${hours}h ${mins.toString().padStart(2, '0')}m`
   }
 
-  function addRecord(workerId: string, type: TimeRecord['type'], photo?: string) {
+  async function addRecord(workerId: string, type: TimeRecord['type'], photo?: string) {
     const now = new Date()
+    const today = now.toISOString().split('T')[0]
     const record: TimeRecord = {
       type,
       time: formatTime12h(now),
@@ -339,93 +329,28 @@ export function useTimeTracker() {
       photo
     }
 
-    let ws = state.value.workerStates[workerId]
-    if (!ws) {
-      ws = { currentDay: null, history: [] }
-      state.value.workerStates[workerId] = ws
+    let state = workerStates.value[workerId]
+    if (!state) {
+      state = { currentDay: null, history: [] }
     }
 
-    if (!ws.currentDay) {
-      ws.currentDay = {
-        date: formatDate(now),
-        records: [],
-        totalMinutes: 0
+    // Check if it's a new day
+    if (!state.currentDay || state.currentDay.date !== today) {
+      // Save old day to history if it had records
+      if (state.currentDay && state.currentDay.records.length > 0) {
+        state.history.push(state.currentDay)
       }
+      state.currentDay = { date: today!, records: [], totalMinutes: 0 }
     }
 
-    ws.currentDay.records.push(record)
+    state.currentDay.records.push(record)
     
     if (type === 'end') {
-      ws.currentDay.totalMinutes = getWorkedMinutes(workerId, false)
-      ws.history.push({ ...ws.currentDay })
+      state.currentDay.totalMinutes = getWorkedMinutes(workerId, false)
+      state.history.push({ ...state.currentDay })
     }
 
-    persist()
-  }
-
-  // Admin: Edit records
-  function updateRecord(workerId: string, date: string, recordIndex: number, updates: Partial<TimeRecord>) {
-    const ws = getWorkerState(workerId)
-    if (!ws) return
-
-    // Check current day
-    if (ws.currentDay?.date === date) {
-      const record = ws.currentDay.records[recordIndex]
-      if (record) {
-        Object.assign(record, updates)
-        if (updates.time) {
-          // Recalculate timestamp from time string
-          const [timePart, period] = updates.time.split(' ')
-          const [h, m] = (timePart || '').split(':').map(Number)
-          let hours = h || 0
-          if (period?.toLowerCase() === 'pm' && hours !== 12) hours += 12
-          if (period?.toLowerCase() === 'am' && hours === 12) hours = 0
-          
-          const dateObj = new Date(date)
-          dateObj.setHours(hours, m || 0, 0, 0)
-          record.timestamp = dateObj.getTime()
-        }
-        ws.currentDay.totalMinutes = getWorkedMinutes(workerId, false)
-      }
-    } else {
-      // Check history
-      const dayLog = ws.history.find(d => d.date === date)
-      if (dayLog) {
-        const record = dayLog.records[recordIndex]
-        if (record) {
-          Object.assign(record, updates)
-          // Recalculate total
-          let total = 0
-          let workStart: number | null = null
-          for (const r of dayLog.records) {
-            if (r.type === 'start' || r.type === 'return') {
-              workStart = r.timestamp
-            } else if ((r.type === 'break' || r.type === 'end') && workStart !== null) {
-              total += r.timestamp - workStart
-              workStart = null
-            }
-          }
-          dayLog.totalMinutes = Math.floor(total / 60000)
-        }
-      }
-    }
-    persist()
-  }
-
-  function deleteRecord(workerId: string, date: string, recordIndex: number) {
-    const ws = getWorkerState(workerId)
-    if (!ws) return
-
-    if (ws.currentDay?.date === date) {
-      ws.currentDay.records.splice(recordIndex, 1)
-      ws.currentDay.totalMinutes = getWorkedMinutes(workerId, false)
-    } else {
-      const dayLog = ws.history.find(d => d.date === date)
-      if (dayLog) {
-        dayLog.records.splice(recordIndex, 1)
-      }
-    }
-    persist()
+    await setDoc(doc(db, 'workerStates', workerId), state)
   }
 
   // Statistics
@@ -439,7 +364,6 @@ export function useTimeTracker() {
       return Math.round((mins / 60) * (worker.hourlyRate || 0) * 100) / 100
     }
     
-    // For monthly, calculate daily rate based on expected hours
     let weeklyMinutes = 0
     for (const day of worker.schedule || []) {
       if (day.active) {
@@ -472,7 +396,6 @@ export function useTimeTracker() {
     const currentMonth = now.getMonth()
     const currentYear = now.getFullYear()
 
-    // Calculate expected hours
     let weeklyMinutes = 0
     for (const day of worker.schedule || []) {
       if (day.active) {
@@ -485,7 +408,6 @@ export function useTimeTracker() {
     }
     const expectedMonthlyMinutes = weeklyMinutes * 4.33
 
-    // Calculate worked hours
     let workedMinutes = 0
     for (const day of ws.history) {
       const dayDate = new Date(day.date)
@@ -545,10 +467,69 @@ export function useTimeTracker() {
     })).reverse()
   }
 
+  // Record editing
+  async function updateRecord(workerId: string, date: string, recordIndex: number, updates: Partial<TimeRecord>) {
+    const state = workerStates.value[workerId]
+    if (!state) return
+
+    if (state.currentDay?.date === date) {
+      const record = state.currentDay.records[recordIndex]
+      if (record) {
+        Object.assign(record, updates)
+        state.currentDay.totalMinutes = calculateMinutes(state.currentDay.records)
+      }
+    } else {
+      const dayLog = state.history.find(d => d.date === date)
+      if (dayLog) {
+        const record = dayLog.records[recordIndex]
+        if (record) {
+          Object.assign(record, updates)
+          dayLog.totalMinutes = calculateMinutes(dayLog.records)
+        }
+      }
+    }
+    
+    await setDoc(doc(db, 'workerStates', workerId), state)
+  }
+
+  async function deleteRecord(workerId: string, date: string, recordIndex: number) {
+    const state = workerStates.value[workerId]
+    if (!state) return
+
+    if (state.currentDay?.date === date) {
+      state.currentDay.records.splice(recordIndex, 1)
+      state.currentDay.totalMinutes = calculateMinutes(state.currentDay.records)
+    } else {
+      const dayLog = state.history.find(d => d.date === date)
+      if (dayLog) {
+        dayLog.records.splice(recordIndex, 1)
+        dayLog.totalMinutes = calculateMinutes(dayLog.records)
+      }
+    }
+    
+    await setDoc(doc(db, 'workerStates', workerId), state)
+  }
+
+  function calculateMinutes(records: TimeRecord[]): number {
+    let total = 0
+    let workStart: number | null = null
+
+    for (const record of records) {
+      if (record.type === 'start' || record.type === 'return') {
+        workStart = record.timestamp
+      } else if ((record.type === 'break' || record.type === 'end') && workStart !== null) {
+        total += record.timestamp - workStart
+        workStart = null
+      }
+    }
+
+    return Math.floor(total / 60000)
+  }
+
   return {
+    isLoading,
     currentTimeFormatted,
     todayFormatted,
-    state: computed(() => state.value),
     // Admin
     getAdmin,
     setAdminPin,
@@ -574,7 +555,6 @@ export function useTimeTracker() {
     deleteRecord,
     // Stats
     getMonthlyStats,
-    getHistory,
-    persist
+    getHistory
   }
 }

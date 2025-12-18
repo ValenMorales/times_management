@@ -5,6 +5,7 @@ import { useTimeTracker } from './composables/useTimeTracker'
 import LoginScreen from './components/LoginScreen.vue'
 import WorkerView from './components/WorkerView.vue'
 import AdminPanel from './components/AdminPanel.vue'
+import ProgressSpinner from 'primevue/progressspinner'
 
 const tracker = useTimeTracker()
 
@@ -70,24 +71,32 @@ function handleLogout() {
 
 <template>
   <div class="app dark-mode">
-    <LoginScreen
-      v-if="!isLoggedIn"
-      ref="loginRef"
-      :workers="tracker.getWorkers()"
-      @login-admin="handleLoginAdmin"
-      @login-worker="handleLoginWorker"
-    />
+    <!-- Loading state -->
+    <div v-if="tracker.isLoading.value" class="loading-screen">
+      <ProgressSpinner />
+      <p>Cargando...</p>
+    </div>
 
-    <AdminPanel
-      v-else-if="isAdmin"
-      @logout="handleLogout"
-    />
+    <template v-else>
+      <LoginScreen
+        v-if="!isLoggedIn"
+        ref="loginRef"
+        :workers="tracker.getWorkers()"
+        @login-admin="handleLoginAdmin"
+        @login-worker="handleLoginWorker"
+      />
 
-    <WorkerView
-      v-else-if="currentWorker"
-      :worker="currentWorker"
-      @logout="handleLogout"
-    />
+      <AdminPanel
+        v-else-if="isAdmin"
+        @logout="handleLogout"
+      />
+
+      <WorkerView
+        v-else-if="currentWorker"
+        :worker="currentWorker"
+        @logout="handleLogout"
+      />
+    </template>
   </div>
 </template>
 
@@ -95,5 +104,15 @@ function handleLogout() {
 .app {
   min-height: 100vh;
   min-height: 100dvh;
+}
+
+.loading-screen {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  color: var(--text-secondary);
 }
 </style>
