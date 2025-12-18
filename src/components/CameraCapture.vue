@@ -19,22 +19,40 @@ const stream = ref<MediaStream | null>(null)
 const capturedPhoto = ref<string | null>(null)
 const error = ref<string | null>(null)
 const isLoading = ref(false)
+const isVideoReady = ref(false)
 
 async function startCamera() {
   try {
     isLoading.value = true
+    isVideoReady.value = false
     error.value = null
+    
     stream.value = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'user', width: 640, height: 480 },
+      video: { 
+        facingMode: 'user', 
+        width: { ideal: 640 }, 
+        height: { ideal: 480 } 
+      },
       audio: false
     })
+    
     if (videoRef.value) {
       videoRef.value.srcObject = stream.value
+      
+      // Esperar a que el video esté listo
+      videoRef.value.onloadedmetadata = () => {
+        videoRef.value?.play().then(() => {
+          isVideoReady.value = true
+          isLoading.value = false
+        }).catch((e) => {
+          console.error('Error playing video:', e)
+          isLoading.value = false
+        })
+      }
     }
   } catch (e) {
     console.error('Camera error:', e)
     error.value = 'No se pudo acceder a la cámara. Puedes continuar sin foto.'
-  } finally {
     isLoading.value = false
   }
 }
@@ -44,20 +62,34 @@ function stopCamera() {
     stream.value.getTracks().forEach(track => track.stop())
     stream.value = null
   }
+  isVideoReady.value = false
 }
 
 function takePhoto() {
-  if (!videoRef.value) return
+  if (!videoRef.value || !isVideoReady.value) return
+  
+  const video = videoRef.value
+  
+  // Usar dimensiones reales del video
+  const width = video.videoWidth
+  const height = video.videoHeight
+  
+  if (width === 0 || height === 0) {
+    console.error('Video dimensions are 0')
+    error.value = 'Error al capturar. Intenta de nuevo.'
+    return
+  }
   
   const canvas = document.createElement('canvas')
-  canvas.width = videoRef.value.videoWidth || 640
-  canvas.height = videoRef.value.videoHeight || 480
+  canvas.width = width
+  canvas.height = height
   
   const ctx = canvas.getContext('2d')
   if (!ctx) return
   
-  ctx.drawImage(videoRef.value, 0, 0)
-  capturedPhoto.value = canvas.toDataURL('image/jpeg', 0.6)
+  // Dibujar el frame actual del video
+  ctx.drawImage(video, 0, 0, width, height)
+  capturedPhoto.value = canvas.toDataURL('image/jpeg', 0.7)
 }
 
 function retakePhoto() {
@@ -124,9 +156,13 @@ onUnmounted(() => {
             autoplay 
             playsinline
             muted
+            :class="{ 'video-ready': isVideoReady }"
           ></video>
           <div class="video-overlay">
             <div class="face-guide"></div>
+          </div>
+          <div v-if="!isVideoReady && !isLoading" class="video-loading">
+            <i class="pi pi-spin pi-spinner"></i>
           </div>
         </div>
         
@@ -143,7 +179,7 @@ onUnmounted(() => {
           label="Tomar Foto" 
           icon="pi pi-camera"
           @click="takePhoto"
-          :disabled="isLoading"
+          :disabled="!isVideoReady"
         />
         
         <template v-else-if="capturedPhoto">
@@ -209,6 +245,23 @@ onUnmounted(() => {
   width: 100%;
   display: block;
   transform: scaleX(-1);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.video-wrapper video.video-ready {
+  opacity: 1;
+}
+
+.video-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  font-size: 2rem;
 }
 
 .video-overlay {
