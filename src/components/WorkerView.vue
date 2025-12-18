@@ -56,6 +56,55 @@ const actionLabel = computed(() => {
   }
   return pendingAction.value ? labels[pendingAction.value] : ''
 })
+
+// Horario de la semana
+const dayNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado']
+const shortDayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
+
+const weekSchedule = computed(() => {
+  const today = new Date()
+  const currentDayOfWeek = today.getDay()
+  
+  // Obtener el inicio de la semana (lunes)
+  const startOfWeek = new Date(today)
+  const diff = currentDayOfWeek === 0 ? -6 : 1 - currentDayOfWeek
+  startOfWeek.setDate(today.getDate() + diff)
+  
+  const schedule = []
+  
+  for (let i = 0; i < 7; i++) {
+    const date = new Date(startOfWeek)
+    date.setDate(startOfWeek.getDate() + i)
+    const dayIndex = date.getDay()
+    const dateStr = date.toISOString().split('T')[0]
+    
+    const daySchedule = props.worker.schedule?.[dayIndex]
+    const isExtraRestDay = props.worker.restDays?.includes(dateStr) || false
+    const isRegularRestDay = !daySchedule?.active
+    const isRest = isExtraRestDay || isRegularRestDay
+    const isToday = date.toDateString() === today.toDateString()
+    
+    schedule.push({
+      dayName: dayNames[dayIndex],
+      shortName: shortDayNames[dayIndex],
+      date: date.getDate(),
+      dateStr,
+      isToday,
+      isRest,
+      isExtraRestDay,
+      shifts: isRest ? [] : (daySchedule?.shifts || [])
+    })
+  }
+  
+  return schedule
+})
+
+function formatShiftTime(time: string): string {
+  const [hours, minutes] = time.split(':').map(Number)
+  const period = hours >= 12 ? 'PM' : 'AM'
+  const displayHours = hours % 12 || 12
+  return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`
+}
 </script>
 
 <template>
@@ -161,6 +210,42 @@ const actionLabel = computed(() => {
           <i v-if="record.photo" class="pi pi-image photo-indicator" title="Con foto"></i>
         </li>
       </ul>
+    </div>
+
+    <!-- Horario de la semana -->
+    <div class="schedule-section">
+      <h3><i class="pi pi-calendar"></i> Mi Horario Esta Semana</h3>
+      <div class="week-grid">
+        <div 
+          v-for="day in weekSchedule" 
+          :key="day.dateStr"
+          class="day-card"
+          :class="{ 
+            'is-today': day.isToday, 
+            'is-rest': day.isRest 
+          }"
+        >
+          <div class="day-header">
+            <span class="day-name">{{ day.shortName }}</span>
+            <span class="day-date">{{ day.date }}</span>
+          </div>
+          <div class="day-content">
+            <template v-if="day.isRest">
+              <span class="rest-label">
+                <i class="pi pi-moon"></i>
+                {{ day.isExtraRestDay ? 'Libre' : 'Descanso' }}
+              </span>
+            </template>
+            <template v-else>
+              <div v-for="(shift, idx) in day.shifts" :key="idx" class="shift-time">
+                <span>{{ formatShiftTime(shift.start) }}</span>
+                <span class="shift-separator">-</span>
+                <span>{{ formatShiftTime(shift.end) }}</span>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="summary-section">
@@ -279,7 +364,8 @@ const actionLabel = computed(() => {
 .btn-end { background: linear-gradient(135deg, var(--danger), #dc2626) !important; }
 
 .records-section,
-.summary-section {
+.summary-section,
+.schedule-section {
   background: var(--bg-card);
   border-radius: 1rem;
   padding: 1rem;
@@ -287,13 +373,122 @@ const actionLabel = computed(() => {
 }
 
 .records-section h3,
-.summary-section h3 {
+.summary-section h3,
+.schedule-section h3 {
   font-size: 0.95rem;
   color: var(--text-secondary);
   margin-bottom: 1rem;
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+/* Week schedule grid */
+.week-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0.35rem;
+}
+
+.day-card {
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 0.5rem;
+  padding: 0.4rem;
+  text-align: center;
+  border: 1px solid transparent;
+  transition: all 0.2s;
+}
+
+.day-card.is-today {
+  background: rgba(14, 165, 233, 0.15);
+  border-color: var(--accent);
+}
+
+.day-card.is-rest {
+  opacity: 0.6;
+}
+
+.day-card.is-rest.is-today {
+  opacity: 1;
+  background: rgba(234, 179, 8, 0.15);
+  border-color: var(--warning);
+}
+
+.day-header {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 0.25rem;
+}
+
+.day-name {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.day-card.is-today .day-name {
+  color: var(--accent);
+}
+
+.day-date {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.day-content {
+  font-size: 0.6rem;
+  min-height: 2rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.15rem;
+}
+
+.rest-label {
+  color: var(--warning);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  font-size: 0.55rem;
+}
+
+.rest-label i {
+  font-size: 0.7rem;
+}
+
+.shift-time {
+  color: var(--text-secondary);
+  font-size: 0.5rem;
+  line-height: 1.2;
+}
+
+.shift-separator {
+  margin: 0 0.1rem;
+  opacity: 0.5;
+}
+
+@media (max-width: 400px) {
+  .week-grid {
+    gap: 0.25rem;
+  }
+  
+  .day-card {
+    padding: 0.3rem;
+  }
+  
+  .day-name {
+    font-size: 0.55rem;
+  }
+  
+  .day-date {
+    font-size: 0.85rem;
+  }
+  
+  .shift-time {
+    font-size: 0.45rem;
+  }
 }
 
 .timeline-list {
