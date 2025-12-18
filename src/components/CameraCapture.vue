@@ -20,16 +20,32 @@ const capturedPhoto = ref<string | null>(null)
 const error = ref<string | null>(null)
 const isLoading = ref(false)
 const isVideoReady = ref(false)
+const useBackCamera = ref(false)
+
+// Verificar si estamos en un contexto seguro (HTTPS o localhost)
+const isSecureContext = window.isSecureContext || 
+  location.hostname === 'localhost' || 
+  location.hostname === '127.0.0.1'
 
 async function startCamera() {
+  // Si no es contexto seguro, mostrar error
+  if (!isSecureContext) {
+    error.value = 'La cámara requiere conexión segura (HTTPS). Usa la versión de GitHub Pages o continúa sin foto.'
+    isLoading.value = false
+    return
+  }
+
   try {
     isLoading.value = true
     isVideoReady.value = false
     error.value = null
     
+    // Intentar con cámara frontal o trasera según preferencia
+    const facingMode = useBackCamera.value ? 'environment' : 'user'
+    
     stream.value = await navigator.mediaDevices.getUserMedia({
       video: { 
-        facingMode: 'user', 
+        facingMode: { ideal: facingMode },
         width: { ideal: 640 }, 
         height: { ideal: 480 } 
       },
@@ -46,15 +62,39 @@ async function startCamera() {
           isLoading.value = false
         }).catch((e) => {
           console.error('Error playing video:', e)
+          error.value = 'Error al reproducir video. Intenta con otra cámara.'
           isLoading.value = false
         })
       }
+      
+      // Timeout por si la cámara no responde
+      setTimeout(() => {
+        if (!isVideoReady.value && !error.value) {
+          error.value = 'La cámara no responde. Intenta con otra cámara o continúa sin foto.'
+          isLoading.value = false
+          stopCamera()
+        }
+      }, 5000)
     }
-  } catch (e) {
+  } catch (e: unknown) {
     console.error('Camera error:', e)
-    error.value = 'No se pudo acceder a la cámara. Puedes continuar sin foto.'
+    const errorMsg = e instanceof Error ? e.message : 'Error desconocido'
+    if (errorMsg.includes('Permission') || errorMsg.includes('NotAllowed')) {
+      error.value = 'Permiso de cámara denegado. Habilítalo en la configuración del navegador.'
+    } else if (errorMsg.includes('NotFound') || errorMsg.includes('DevicesNotFound')) {
+      error.value = 'No se encontró una cámara en este dispositivo.'
+    } else {
+      error.value = `No se pudo acceder a la cámara: ${errorMsg}`
+    }
     isLoading.value = false
   }
+}
+
+function toggleCamera() {
+  useBackCamera.value = !useBackCamera.value
+  stopCamera()
+  error.value = null
+  startCamera()
 }
 
 function stopCamera() {
@@ -156,7 +196,7 @@ onUnmounted(() => {
             autoplay 
             playsinline
             muted
-            :class="{ 'video-ready': isVideoReady }"
+            :class="{ 'video-ready': isVideoReady, 'back-camera': useBackCamera }"
           ></video>
           <div class="video-overlay">
             <div class="face-guide"></div>
@@ -164,10 +204,22 @@ onUnmounted(() => {
           <div v-if="!isVideoReady && !isLoading" class="video-loading">
             <i class="pi pi-spin pi-spinner"></i>
           </div>
+          <button 
+            v-if="isVideoReady" 
+            class="switch-camera-btn" 
+            @click="toggleCamera"
+            title="Cambiar cámara"
+          >
+            <i class="pi pi-sync"></i>
+          </button>
         </div>
         
         <div v-else class="photo-preview">
-          <img :src="capturedPhoto" alt="Foto capturada" />
+          <img 
+            :src="capturedPhoto" 
+            alt="Foto capturada" 
+            :class="{ 'back-camera': useBackCamera }"
+          />
         </div>
       </template>
     </div>
@@ -253,6 +305,31 @@ onUnmounted(() => {
   opacity: 1;
 }
 
+.video-wrapper video.back-camera {
+  transform: scaleX(1); /* No espejo para cámara trasera */
+}
+
+.switch-camera-btn {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+}
+
+.switch-camera-btn:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
 .video-loading {
   position: absolute;
   inset: 0;
@@ -288,6 +365,10 @@ onUnmounted(() => {
   width: 100%;
   display: block;
   transform: scaleX(-1);
+}
+
+.photo-preview img.back-camera {
+  transform: scaleX(1);
 }
 
 .camera-actions {
