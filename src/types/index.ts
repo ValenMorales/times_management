@@ -27,7 +27,7 @@ export interface TimeRecord {
   type: 'start' | 'break' | 'return' | 'end'
   time: string
   timestamp: number
-  photo?: string // Base64 image
+  photo: string | null // Base64 image, null if no photo
 }
 
 export interface DayLog {

@@ -326,7 +326,7 @@ export function useTimeTracker() {
       type,
       time: formatTime12h(now),
       timestamp: now.getTime(),
-      photo
+      photo: photo || null // Firebase no acepta undefined
     }
 
     let state = workerStates.value[workerId]
