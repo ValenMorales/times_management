@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import type { Worker } from '../types'
+import { ref, computed, onMounted, watch } from 'vue'
+import type { Worker, Payment, DaySchedule, EditRequest, TimeRecord } from '../types'
 import { useTimeTracker } from '../composables/useTimeTracker'
+import { formatDateLocal } from '../utils/timeHelpers'
 
 import Button from 'primevue/button'
 import Tag from 'primevue/tag'
+import ProgressBar from 'primevue/progressbar'
+import Dialog from 'primevue/dialog'
+import InputText from 'primevue/inputtext'
+import Select from 'primevue/select'
 import CameraCapture from './CameraCapture.vue'
+import HistoryDialog from './HistoryDialog.vue'
 
 const props = defineProps<{
   worker: Worker
@@ -16,6 +22,7 @@ const emit = defineEmits<{
 }>()
 
 const tracker = useTimeTracker()
+const showHistory = ref(false)
 
 const showCamera = ref(false)
 const pendingAction = ref<'start' | 'break' | 'return' | 'end' | null>(null)
@@ -27,6 +34,59 @@ const workedTime = computed(() => tracker.formatWorkedTime(workedMinutes.value))
 const monthlyStats = computed(() => tracker.getMonthlyStats(props.worker.id))
 const dailyEarnings = computed(() => tracker.getDailyEarnings(props.worker.id))
 const isHourly = computed(() => props.worker.paymentType === 'hourly')
+const historyData = computed(() => tracker.getHistory(props.worker.id))
+
+// Accumulated stats
+interface PeriodStats {
+  periodLabel: string
+  periodStart: string
+  periodEnd: string
+  minutesWorked: number
+  minutesExpected: number
+  hoursWorked: string
+  hoursExpected: string
+  daysWorked: number
+  daysExpected: number // Días laborales esperados (sin descansos)
+  daysInPeriod: number // Días calendario del período
+  amountEarned: number
+  amountExpected: number
+  difference: number
+  percentComplete: number
+  lastPayment: Payment | null
+}
+
+const periodStats = ref<PeriodStats | null>(null)
+const isLoadingStats = ref(true)
+
+async function loadPeriodStats() {
+  isLoadingStats.value = true
+  try {
+    periodStats.value = await tracker.getPeriodStats(props.worker.id)
+  } catch (error) {
+    console.error('Error loading period stats:', error)
+  } finally {
+    isLoadingStats.value = false
+  }
+}
+
+onMounted(() => {
+  loadPeriodStats()
+})
+
+// Reload stats when worker changes or when time records are added
+watch(() => [props.worker.id, todayRecords.value.length], () => {
+  loadPeriodStats()
+})
+
+const paymentPeriodLabel = computed(() => {
+  const labels = {
+    daily: 'Diario',
+    weekly: 'Semanal',
+    biweekly: 'Quincenal',
+    monthly: 'Mensual'
+  }
+  return labels[props.worker.paymentPeriod || 'biweekly']
+})
 
 function initiateAction(action: 'start' | 'break' | 'return' | 'end') {
   pendingAction.value = action
@@ -61,6 +121,34 @@ const actionLabel = computed(() => {
 const dayNames = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado']
 const shortDayNames = ['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb']
 
+// Horario semanal efectivo (puede ser personalizado o base)
+const effectiveWeekSchedule = ref<DaySchedule[] | null>(null)
+const isLoadingWeekSchedule = ref(true)
+
+async function loadEffectiveWeekSchedule() {
+  isLoadingWeekSchedule.value = true
+  try {
+    const weekStart = tracker.getCurrentWeekStart()
+    const customSchedule = await tracker.getWeekSchedule(props.worker.id, weekStart)
+    
+    if (customSchedule) {
+      effectiveWeekSchedule.value = customSchedule.schedule
+    } else {
+      effectiveWeekSchedule.value = props.worker.schedule
+    }
+  } catch (error) {
+    console.error('Error loading week schedule:', error)
+    effectiveWeekSchedule.value = props.worker.schedule
+  } finally {
+    isLoadingWeekSchedule.value = false
+  }
+}
+
+// Cargar horario al montar y cuando cambia el trabajador
+watch(() => props.worker.id, () => {
+  loadEffectiveWeekSchedule()
+}, { immediate: true })
+
 const weekSchedule = computed(() => {
   const today = new Date()
   const currentDayOfWeek = today.getDay()
@@ -72,16 +160,20 @@ const weekSchedule = computed(() => {
   
   const schedule = []
   
+  // Usar el horario efectivo (personalizado o base)
+  const scheduleToUse = effectiveWeekSchedule.value || props.worker.schedule
+  
   for (let i = 0; i < 7; i++) {
     const date = new Date(startOfWeek)
     date.setDate(startOfWeek.getDate() + i)
     const dayIndex = date.getDay()
-    const dateStr = date.toISOString().split('T')[0]
+    const dateStr = formatDateLocal(date)
     
-    const daySchedule = props.worker.schedule?.[dayIndex]
+    const daySchedule = scheduleToUse?.[dayIndex]
+    const isVacation = props.worker.vacationDays?.includes(dateStr) || false
     const isExtraRestDay = props.worker.restDays?.includes(dateStr) || false
     const isRegularRestDay = !daySchedule?.active
-    const isRest = isExtraRestDay || isRegularRestDay
+    const isRest = !isVacation && (isExtraRestDay || isRegularRestDay)
     const isToday = date.toDateString() === today.toDateString()
     
     schedule.push({
@@ -91,8 +183,9 @@ const weekSchedule = computed(() => {
       dateStr,
       isToday,
       isRest,
+      isVacation,
       isExtraRestDay,
-      shifts: isRest ? [] : (daySchedule?.shifts || [])
+      shifts: (isRest && !isVacation) ? [] : (daySchedule?.shifts || [])
     })
   }
   
@@ -100,11 +193,143 @@ const weekSchedule = computed(() => {
 })
 
 function formatShiftTime(time: string): string {
-  const [hours, minutes] = time.split(':').map(Number)
+  const parts = time.split(':').map(Number)
+  const hours = parts[0] ?? 0
+  const minutes = parts[1] ?? 0
   const period = hours >= 12 ? 'PM' : 'AM'
   const displayHours = hours % 12 || 12
   return `${displayHours}:${minutes.toString().padStart(2, '0')} ${period}`
 }
+
+// ==========================================
+// Edit Request System
+// ==========================================
+const showEditRequestDialog = ref(false)
+const editRequestReason = ref('')
+const editRequestType = ref<'edit' | 'add'>('edit')
+const editRequestHours = ref(9)
+const editRequestMinutes = ref(0)
+const editRequestPeriod = ref<'AM' | 'PM'>('AM')
+const editRequestRecordType = ref<'start' | 'break' | 'return' | 'end'>('start')
+const isSubmittingRequest = ref(false)
+
+// Mis solicitudes
+const myRequests = ref<EditRequest[]>([])
+const isLoadingRequests = ref(false)
+const showMyRequestsDialog = ref(false)
+
+const hours = Array.from({ length: 12 }, (_, i) => ({ label: String(i + 1), value: i + 1 }))
+const minutes = Array.from({ length: 12 }, (_, i) => ({ label: String(i * 5).padStart(2, '0'), value: i * 5 }))
+const periods = [{ label: 'AM', value: 'AM' }, { label: 'PM', value: 'PM' }]
+const recordTypes = [
+  { label: 'Inicio', value: 'start' },
+  { label: 'Pausa', value: 'break' },
+  { label: 'Regreso', value: 'return' },
+  { label: 'Fin', value: 'end' }
+]
+
+async function loadMyRequests() {
+  isLoadingRequests.value = true
+  try {
+    myRequests.value = await tracker.getWorkerEditRequests(props.worker.id)
+  } catch (error) {
+    console.error('Error loading requests:', error)
+  } finally {
+    isLoadingRequests.value = false
+  }
+}
+
+function openEditRequestDialog() {
+  editRequestReason.value = ''
+  editRequestType.value = 'edit'
+  editRequestHours.value = 9
+  editRequestMinutes.value = 0
+  editRequestPeriod.value = 'AM'
+  editRequestRecordType.value = 'start'
+  showEditRequestDialog.value = true
+}
+
+function componentsToTime12(hours: number, minutes: number, period: string): string {
+  return `${hours}:${minutes.toString().padStart(2, '0')} ${period}`
+}
+
+async function submitEditRequest() {
+  if (!editRequestReason.value.trim()) return
+  
+  isSubmittingRequest.value = true
+  try {
+    const today = formatDateLocal(new Date())
+    const timeStr = componentsToTime12(editRequestHours.value, editRequestMinutes.value, editRequestPeriod.value)
+    
+    // Convertir hora a timestamp
+    let hours24 = editRequestHours.value
+    if (editRequestPeriod.value === 'AM' && hours24 === 12) hours24 = 0
+    else if (editRequestPeriod.value === 'PM' && hours24 !== 12) hours24 = hours24 + 12
+    
+    const timestamp = new Date(today + 'T' + hours24.toString().padStart(2, '0') + ':' + editRequestMinutes.value.toString().padStart(2, '0') + ':00').getTime()
+    
+    const requestedRecord: TimeRecord = {
+      type: editRequestRecordType.value,
+      time: timeStr,
+      timestamp,
+      photo: null
+    }
+    
+    await tracker.createEditRequest(
+      props.worker.id,
+      today,
+      -1, // -1 indica nuevo registro
+      editRequestType.value,
+      editRequestReason.value,
+      undefined,
+      requestedRecord
+    )
+    
+    showEditRequestDialog.value = false
+    await loadMyRequests()
+  } catch (error) {
+    console.error('Error submitting request:', error)
+  } finally {
+    isSubmittingRequest.value = false
+  }
+}
+
+function openMyRequests() {
+  loadMyRequests()
+  showMyRequestsDialog.value = true
+}
+
+function getStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    pending: 'Pendiente',
+    approved: 'Aprobada',
+    rejected: 'Rechazada'
+  }
+  return labels[status] || status
+}
+
+function getStatusSeverity(status: string): string {
+  const severities: Record<string, string> = {
+    pending: 'warn',
+    approved: 'success',
+    rejected: 'danger'
+  }
+  return severities[status] || 'info'
+}
+
+function formatRequestDate(timestamp: number): string {
+  return new Date(timestamp).toLocaleDateString('es-ES', {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
+}
+
+// Load requests on mount
+onMounted(() => {
+  loadMyRequests()
+})
 </script>
 
 <template>
@@ -222,7 +447,8 @@ function formatShiftTime(time: string): string {
           class="day-card"
           :class="{ 
             'is-today': day.isToday, 
-            'is-rest': day.isRest 
+            'is-rest': day.isRest,
+            'is-vacation': day.isVacation
           }"
         >
           <div class="day-header">
@@ -230,7 +456,13 @@ function formatShiftTime(time: string): string {
             <span class="day-date">{{ day.date }}</span>
           </div>
           <div class="day-content">
-            <template v-if="day.isRest">
+            <template v-if="day.isVacation">
+              <span class="vacation-label">
+                <i class="pi pi-sun"></i>
+                Vacaciones
+              </span>
+            </template>
+            <template v-else-if="day.isRest">
               <span class="rest-label">
                 <i class="pi pi-moon"></i>
                 {{ day.isExtraRestDay ? 'Libre' : 'Descanso' }}
@@ -246,6 +478,79 @@ function formatShiftTime(time: string): string {
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- Acumulado del Período -->
+    <div class="accumulated-section">
+      <h3>
+        <i class="pi pi-wallet"></i> 
+        Mi Acumulado 
+        <Tag :value="paymentPeriodLabel" severity="info" class="period-tag" />
+      </h3>
+      
+      <div v-if="isLoadingStats" class="loading-stats">
+        <i class="pi pi-spin pi-spinner"></i> Cargando...
+      </div>
+      
+      <template v-else-if="periodStats">
+        <div class="period-info">
+          <span class="period-label">{{ periodStats.periodLabel }}</span>
+          <span v-if="periodStats.lastPayment" class="last-payment">
+            Último pago: {{ new Date(periodStats.lastPayment.paidAt).toLocaleDateString('es-ES') }}
+          </span>
+        </div>
+
+        <div class="progress-section">
+          <div class="progress-header">
+            <span>Progreso de horas</span>
+            <span class="progress-percent" :class="{ 'positive': periodStats.percentComplete >= 100 }">
+              {{ periodStats.percentComplete }}%
+            </span>
+          </div>
+          <ProgressBar 
+            :value="Math.min(periodStats.percentComplete, 100)" 
+            :showValue="false"
+            class="hours-progress"
+          />
+          <div class="progress-details">
+            <span>{{ periodStats.hoursWorked }} trabajadas</span>
+            <span>{{ periodStats.hoursExpected }} esperadas</span>
+          </div>
+        </div>
+
+        <div class="accumulated-grid">
+          <div class="accumulated-item">
+            <span class="accumulated-label">Días trabajados</span>
+            <span class="accumulated-value">{{ periodStats.daysWorked }} / {{ periodStats.daysInPeriod }}</span>
+            <span class="accumulated-sublabel">({{ periodStats.daysExpected }} laborales)</span>
+          </div>
+          <div class="accumulated-item earned">
+            <span class="accumulated-label">Ganado</span>
+            <span class="accumulated-value">${{ periodStats.amountEarned.toLocaleString() }}</span>
+          </div>
+          <div class="accumulated-item" :class="periodStats.difference >= 0 ? 'bonus' : 'deduction'">
+            <span class="accumulated-label">
+              {{ periodStats.difference >= 0 ? 'Extra' : 'Deducción' }}
+            </span>
+            <span class="accumulated-value">
+              {{ periodStats.difference >= 0 ? '+' : '' }}${{ periodStats.difference.toLocaleString() }}
+            </span>
+          </div>
+          <div class="accumulated-item total">
+            <span class="accumulated-label">Por Cobrar</span>
+            <span class="accumulated-value">${{ periodStats.amountEarned.toLocaleString() }}</span>
+          </div>
+        </div>
+
+        <p v-if="periodStats.difference < 0" class="deduction-note">
+          <i class="pi pi-info-circle"></i>
+          Has trabajado {{ Math.abs(Math.round((periodStats.minutesExpected - periodStats.minutesWorked) / 60)) }}h menos de lo esperado
+        </p>
+        <p v-else-if="periodStats.difference > 0" class="bonus-note">
+          <i class="pi pi-star"></i>
+          ¡Has trabajado {{ Math.round((periodStats.minutesWorked - periodStats.minutesExpected) / 60) }}h extra!
+        </p>
+      </template>
     </div>
 
     <div class="summary-section">
@@ -270,12 +575,157 @@ function formatShiftTime(time: string): string {
       </div>
     </div>
 
+    <!-- Botón para ver historial -->
+    <div class="history-section">
+      <Button
+        label="Ver Mi Historial"
+        icon="pi pi-history"
+        class="history-btn"
+        outlined
+        @click="showHistory = true"
+      />
+      <Button
+        label="Solicitar Corrección"
+        icon="pi pi-pencil"
+        class="request-btn"
+        severity="warning"
+        outlined
+        @click="openEditRequestDialog"
+      />
+      <Button
+        label="Mis Solicitudes"
+        icon="pi pi-list"
+        class="requests-btn"
+        severity="info"
+        outlined
+        @click="openMyRequests"
+        :badge="myRequests.filter(r => r.status === 'pending').length > 0 ? String(myRequests.filter(r => r.status === 'pending').length) : undefined"
+      />
+    </div>
+
     <CameraCapture
       v-model:visible="showCamera"
       :action-label="actionLabel"
       @capture="handlePhotoCapture"
       @skip="handleSkipPhoto"
     />
+
+    <HistoryDialog
+      v-model:visible="showHistory"
+      :data="historyData"
+    />
+
+    <!-- Diálogo para solicitar corrección -->
+    <Dialog
+      v-model:visible="showEditRequestDialog"
+      header="Solicitar Corrección de Horario"
+      :modal="true"
+      :style="{ width: '90vw', maxWidth: '400px' }"
+    >
+      <div class="edit-request-form">
+        <div class="field">
+          <label>Tipo de registro</label>
+          <Select
+            v-model="editRequestRecordType"
+            :options="recordTypes"
+            option-label="label"
+            option-value="value"
+            class="w-full"
+          />
+        </div>
+        
+        <div class="field">
+          <label>Hora correcta</label>
+          <div class="time-picker-row">
+            <Select
+              v-model="editRequestHours"
+              :options="hours"
+              option-label="label"
+              option-value="value"
+              class="time-select"
+            />
+            <span class="time-separator">:</span>
+            <Select
+              v-model="editRequestMinutes"
+              :options="minutes"
+              option-label="label"
+              option-value="value"
+              class="time-select"
+            />
+            <Select
+              v-model="editRequestPeriod"
+              :options="periods"
+              option-label="label"
+              option-value="value"
+              class="time-select"
+            />
+          </div>
+        </div>
+        
+        <div class="field">
+          <label>Razón de la corrección</label>
+          <InputText
+            v-model="editRequestReason"
+            placeholder="Ej: Olvidé marcar entrada, empecé a las 8..."
+            class="w-full"
+          />
+        </div>
+      </div>
+      
+      <template #footer>
+        <Button label="Cancelar" text @click="showEditRequestDialog = false" />
+        <Button 
+          label="Enviar Solicitud" 
+          icon="pi pi-send" 
+          @click="submitEditRequest"
+          :loading="isSubmittingRequest"
+          :disabled="!editRequestReason.trim()"
+        />
+      </template>
+    </Dialog>
+
+    <!-- Diálogo de mis solicitudes -->
+    <Dialog
+      v-model:visible="showMyRequestsDialog"
+      header="Mis Solicitudes"
+      :modal="true"
+      :style="{ width: '95vw', maxWidth: '500px' }"
+    >
+      <div v-if="isLoadingRequests" class="loading-requests">
+        <i class="pi pi-spin pi-spinner"></i> Cargando...
+      </div>
+      
+      <div v-else-if="myRequests.length === 0" class="no-requests">
+        <i class="pi pi-inbox"></i>
+        <p>No tienes solicitudes</p>
+      </div>
+      
+      <div v-else class="requests-list">
+        <div 
+          v-for="request in myRequests" 
+          :key="request.id"
+          class="request-item"
+          :class="request.status"
+        >
+          <div class="request-header">
+            <Tag :severity="getStatusSeverity(request.status) as any" :value="getStatusLabel(request.status)" />
+            <span class="request-date">{{ formatRequestDate(request.createdAt) }}</span>
+          </div>
+          <div class="request-body">
+            <div class="request-type">
+              <strong>{{ request.requestType === 'add' ? 'Agregar' : 'Editar' }}:</strong>
+              {{ request.requestedValue?.type }} - {{ request.requestedValue?.time }}
+            </div>
+            <div class="request-reason">
+              <i class="pi pi-comment"></i> {{ request.reason }}
+            </div>
+            <div v-if="request.adminNote" class="admin-note">
+              <i class="pi pi-user"></i> Admin: {{ request.adminNote }}
+            </div>
+          </div>
+        </div>
+      </div>
+    </Dialog>
   </div>
 </template>
 
@@ -458,6 +908,28 @@ function formatShiftTime(time: string): string {
   font-size: 0.7rem;
 }
 
+.vacation-label {
+  color: var(--success);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.1rem;
+  font-size: 0.55rem;
+}
+
+.vacation-label i {
+  font-size: 0.7rem;
+}
+
+.day-card.is-vacation {
+  background: rgba(16, 185, 129, 0.15);
+  border-color: var(--success);
+}
+
+.day-card.is-vacation .day-name {
+  color: var(--success);
+}
+
 .shift-time {
   color: var(--text-secondary);
   font-size: 0.5rem;
@@ -572,6 +1044,294 @@ function formatShiftTime(time: string): string {
 .summary-item.highlight .summary-value {
   font-size: 1.3rem;
   color: var(--success);
+}
+
+.history-section {
+  margin-top: 1rem;
+}
+
+.history-btn,
+.request-btn,
+.requests-btn {
+  width: 100%;
+  justify-content: center;
+  margin-bottom: 0.5rem;
+}
+
+/* Edit Request Dialog */
+.edit-request-form .field {
+  margin-bottom: 1rem;
+}
+
+.edit-request-form label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.time-picker-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.time-select {
+  flex: 1;
+}
+
+.time-separator {
+  font-size: 1.2rem;
+  font-weight: bold;
+}
+
+/* My Requests Dialog */
+.loading-requests,
+.no-requests {
+  text-align: center;
+  padding: 2rem;
+  color: var(--text-secondary);
+}
+
+.no-requests i {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+  opacity: 0.5;
+}
+
+.requests-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.request-item {
+  background: var(--bg-card);
+  border-radius: 0.5rem;
+  padding: 1rem;
+  border-left: 3px solid var(--text-secondary);
+}
+
+.request-item.pending {
+  border-left-color: var(--warning);
+}
+
+.request-item.approved {
+  border-left-color: var(--success);
+}
+
+.request-item.rejected {
+  border-left-color: var(--danger);
+}
+
+.request-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+
+.request-date {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.request-body {
+  font-size: 0.9rem;
+}
+
+.request-type {
+  margin-bottom: 0.25rem;
+}
+
+.request-reason {
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.admin-note {
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 0.25rem;
+  font-style: italic;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Accumulated section styles */
+.accumulated-section {
+  background: linear-gradient(135deg, var(--bg-card), rgba(14, 165, 233, 0.08));
+  border: 1px solid rgba(14, 165, 233, 0.2);
+  border-radius: 1rem;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.accumulated-section h3 {
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.period-tag {
+  margin-left: auto;
+}
+
+.loading-stats {
+  text-align: center;
+  padding: 1rem;
+  color: var(--text-secondary);
+}
+
+.period-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  font-size: 0.85rem;
+}
+
+.period-label {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.last-payment {
+  color: var(--text-secondary);
+}
+
+.progress-section {
+  margin-bottom: 1rem;
+}
+
+.progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.progress-percent {
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.progress-percent.positive {
+  color: var(--success);
+}
+
+.hours-progress {
+  height: 8px;
+  border-radius: 4px;
+}
+
+.progress-details {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.accumulated-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+.accumulated-item {
+  background: rgba(255, 255, 255, 0.04);
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  text-align: center;
+}
+
+.accumulated-item.earned {
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.accumulated-item.earned .accumulated-value {
+  color: var(--success);
+}
+
+.accumulated-item.deduction {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.accumulated-item.deduction .accumulated-value {
+  color: var(--danger);
+}
+
+.accumulated-item.bonus {
+  background: rgba(14, 165, 233, 0.1);
+  border: 1px solid rgba(14, 165, 233, 0.3);
+}
+
+.accumulated-item.bonus .accumulated-value {
+  color: var(--accent);
+}
+
+.accumulated-item.total {
+  grid-column: span 2;
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.15), rgba(14, 165, 233, 0.15));
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.accumulated-item.total .accumulated-value {
+  font-size: 1.3rem;
+  color: var(--success);
+}
+
+.accumulated-label {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.25rem;
+  text-transform: uppercase;
+}
+
+.accumulated-value {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.accumulated-sublabel {
+  display: block;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  opacity: 0.7;
+  margin-top: 0.15rem;
+}
+
+.deduction-note,
+.bonus-note {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  font-size: 0.8rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.deduction-note {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+}
+
+.bonus-note {
+  background: rgba(14, 165, 233, 0.1);
+  color: var(--accent);
 }
 </style>
 
