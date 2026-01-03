@@ -19,7 +19,7 @@ import ConfirmDialog from 'primevue/confirmdialog'
 import { useConfirm } from 'primevue/useconfirm'
 import { useToast } from 'primevue/usetoast'
 import Toast from 'primevue/toast'
-import { parseTimeString } from '../utils/timeHelpers'
+import { parseTimeString, datePickerToDateString } from '../utils/timeHelpers'
 
 const emit = defineEmits<{
   (e: 'logout'): void
@@ -93,6 +93,14 @@ const editRecordMinutes = ref(0)
 const editRecordPeriod = ref<'AM' | 'PM'>('AM')
 const showPhotoDialog = ref(false)
 const viewingPhoto = ref<string | null>(null)
+
+// Add new record
+const showAddRecordDialog = ref(false)
+const newRecordDate = ref<Date>(new Date())
+const newRecordType = ref<'start' | 'break' | 'return' | 'end'>('start')
+const newRecordHours = ref(9)
+const newRecordMinutes = ref(0)
+const newRecordPeriod = ref<'AM' | 'PM'>('AM')
 
 const workers = computed(() => tracker.getWorkers())
 const selectedWorker = computed(() => 
@@ -428,6 +436,36 @@ function deleteRecord(historyItem: any, recordIndex: number) {
       }
     }
   })
+}
+
+// Add new record functions
+function openAddRecordDialog() {
+  newRecordDate.value = new Date()
+  newRecordType.value = 'start'
+  newRecordHours.value = 9
+  newRecordMinutes.value = 0
+  newRecordPeriod.value = 'AM'
+  showAddRecordDialog.value = true
+}
+
+async function saveNewRecord() {
+  if (!selectedWorkerId.value) return
+  
+  // Get date from DatePicker
+  const dateStr = datePickerToDateString(newRecordDate.value)
+  
+  // Build time string
+  const time12h = `${newRecordHours.value}:${newRecordMinutes.value.toString().padStart(2, '0')} ${newRecordPeriod.value}`
+  
+  await tracker.addRecordToDate(
+    selectedWorkerId.value,
+    dateStr,
+    newRecordType.value,
+    time12h
+  )
+  
+  showAddRecordDialog.value = false
+  toast.add({ severity: 'success', summary: 'Agregado', detail: 'Registro creado correctamente', life: 3000 })
 }
 
 function viewPhoto(photo: string) {
@@ -1048,6 +1086,13 @@ function getRequestTypeLabel(type: string): string {
             <!-- Acciones rápidas -->
             <div v-if="selectedWorkerId" class="quick-actions">
               <Button 
+                label="Agregar Registro" 
+                icon="pi pi-plus" 
+                severity="success"
+                size="small"
+                @click="openAddRecordDialog"
+              />
+              <Button 
                 label="Resetear día actual" 
                 icon="pi pi-refresh" 
                 severity="warning"
@@ -1473,6 +1518,72 @@ function getRequestTypeLabel(type: string): string {
       <template #footer>
         <Button label="Cancelar" text @click="showCopyDialog = false" />
         <Button label="Copiar" icon="pi pi-copy" @click="copyScheduleFromWeek" :disabled="!copyFromWeek" />
+      </template>
+    </Dialog>
+
+    <!-- Add Record Dialog -->
+    <Dialog 
+      v-model:visible="showAddRecordDialog" 
+      header="Agregar Registro"
+      modal
+      :style="{ width: '400px' }"
+    >
+      <div class="dialog-form">
+        <div class="field">
+          <label>Fecha</label>
+          <DatePicker
+            v-model="newRecordDate"
+            dateFormat="dd/mm/yy"
+            showIcon
+            fluid
+          />
+        </div>
+        <div class="field">
+          <label>Tipo</label>
+          <Select 
+            v-model="newRecordType"
+            :options="[
+              { label: 'Inicio', value: 'start' },
+              { label: 'Pausa', value: 'break' },
+              { label: 'Regreso', value: 'return' },
+              { label: 'Fin', value: 'end' }
+            ]"
+            option-label="label"
+            option-value="value"
+            fluid
+          />
+        </div>
+        <div class="field">
+          <label>Hora</label>
+          <div class="time-input-group">
+            <InputNumber 
+              v-model="newRecordHours" 
+              :min="1" 
+              :max="12" 
+              showButtons 
+              buttonLayout="horizontal"
+              :inputStyle="{ width: '60px', textAlign: 'center' }"
+            />
+            <span class="time-separator">:</span>
+            <InputNumber 
+              v-model="newRecordMinutes" 
+              :min="0" 
+              :max="59" 
+              showButtons 
+              buttonLayout="horizontal"
+              :inputStyle="{ width: '60px', textAlign: 'center' }"
+            />
+            <Select
+              v-model="newRecordPeriod"
+              :options="['AM', 'PM']"
+              class="period-select"
+            />
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <Button label="Cancelar" text @click="showAddRecordDialog = false" />
+        <Button label="Agregar" icon="pi pi-plus" @click="saveNewRecord" />
       </template>
     </Dialog>
 

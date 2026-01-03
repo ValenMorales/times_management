@@ -10,8 +10,10 @@ import ProgressBar from 'primevue/progressbar'
 import Dialog from 'primevue/dialog'
 import InputText from 'primevue/inputtext'
 import Select from 'primevue/select'
+import DatePicker from 'primevue/datepicker'
 import CameraCapture from './CameraCapture.vue'
 import HistoryDialog from './HistoryDialog.vue'
+import { datePickerToDateString } from '../utils/timeHelpers'
 
 const props = defineProps<{
   worker: Worker
@@ -207,6 +209,7 @@ function formatShiftTime(time: string): string {
 const showEditRequestDialog = ref(false)
 const editRequestReason = ref('')
 const editRequestType = ref<'edit' | 'add'>('edit')
+const editRequestDate = ref<Date>(new Date())
 const editRequestHours = ref(9)
 const editRequestMinutes = ref(0)
 const editRequestPeriod = ref<'AM' | 'PM'>('AM')
@@ -242,6 +245,7 @@ async function loadMyRequests() {
 function openEditRequestDialog() {
   editRequestReason.value = ''
   editRequestType.value = 'edit'
+  editRequestDate.value = new Date()
   editRequestHours.value = 9
   editRequestMinutes.value = 0
   editRequestPeriod.value = 'AM'
@@ -258,7 +262,8 @@ async function submitEditRequest() {
   
   isSubmittingRequest.value = true
   try {
-    const today = formatDateLocal(new Date())
+    // Usar la fecha seleccionada
+    const selectedDate = datePickerToDateString(editRequestDate.value)
     const timeStr = componentsToTime12(editRequestHours.value, editRequestMinutes.value, editRequestPeriod.value)
     
     // Convertir hora a timestamp
@@ -266,7 +271,7 @@ async function submitEditRequest() {
     if (editRequestPeriod.value === 'AM' && hours24 === 12) hours24 = 0
     else if (editRequestPeriod.value === 'PM' && hours24 !== 12) hours24 = hours24 + 12
     
-    const timestamp = new Date(today + 'T' + hours24.toString().padStart(2, '0') + ':' + editRequestMinutes.value.toString().padStart(2, '0') + ':00').getTime()
+    const timestamp = new Date(selectedDate + 'T' + hours24.toString().padStart(2, '0') + ':' + editRequestMinutes.value.toString().padStart(2, '0') + ':00').getTime()
     
     const requestedRecord: TimeRecord = {
       type: editRequestRecordType.value,
@@ -277,7 +282,7 @@ async function submitEditRequest() {
     
     await tracker.createEditRequest(
       props.worker.id,
-      today,
+      selectedDate,
       -1, // -1 indica nuevo registro
       editRequestType.value,
       editRequestReason.value,
@@ -623,6 +628,18 @@ onMounted(() => {
       :style="{ width: '90vw', maxWidth: '400px' }"
     >
       <div class="edit-request-form">
+        <div class="field">
+          <label>Fecha</label>
+          <DatePicker
+            v-model="editRequestDate"
+            dateFormat="dd/mm/yy"
+            :maxDate="new Date()"
+            showIcon
+            fluid
+            class="w-full"
+          />
+        </div>
+        
         <div class="field">
           <label>Tipo de registro</label>
           <Select
