@@ -19,7 +19,7 @@ import ConfirmDialog from 'primevue/confirmdialog'
 import { useConfirm } from 'primevue/useconfirm'
 import { useToast } from 'primevue/usetoast'
 import Toast from 'primevue/toast'
-import { parseTimeString, datePickerToDateString } from '../utils/timeHelpers'
+import { parseTimeString, datePickerToDateString, formatDateLocal } from '../utils/timeHelpers'
 
 const emit = defineEmits<{
   (e: 'logout'): void
@@ -131,6 +131,43 @@ const selectedWorkerHistory = computed(() => {
 const selectedWorkerStats = computed(() =>
   selectedWorkerId.value ? tracker.getMonthlyStats(selectedWorkerId.value) : null
 )
+
+// Calcular las fechas específicas de cada día de la semana seleccionada
+const weekDatesForSelectedWeek = computed(() => {
+  if (!selectedWeek.value) return []
+  
+  // selectedWeek.value es el lunes de la semana en formato YYYY-MM-DD
+  const weekStart = new Date(selectedWeek.value + 'T12:00:00')
+  
+  // El array weekDays empieza en Domingo (índice 0)
+  // selectedWeek es el lunes, así que:
+  // Domingo = weekStart - 1 día
+  // Lunes = weekStart
+  // Martes = weekStart + 1 día, etc.
+  
+  const dates: string[] = []
+  for (let i = 0; i < 7; i++) {
+    const date = new Date(weekStart)
+    // i=0 es Domingo, que está 1 día antes del lunes
+    // i=1 es Lunes (el weekStart)
+    // etc.
+    date.setDate(weekStart.getDate() + (i === 0 ? -1 : i - 1))
+    dates.push(formatDateLocal(date))
+  }
+  
+  return dates
+})
+
+// Formatear fecha para mostrar: "Lunes 6/1" 
+function formatDayWithDate(dayIndex: number): string {
+  const date = weekDatesForSelectedWeek.value[dayIndex]
+  if (!date) return weekDays[dayIndex] ?? ''
+  
+  const d = new Date(date + 'T12:00:00')
+  const dayNum = d.getDate()
+  const month = d.getMonth() + 1
+  return `${weekDays[dayIndex]} ${dayNum}/${month}`
+}
 
 watch(workers, (w) => {
   if (w.length > 0 && !selectedWorkerId.value) {
@@ -881,7 +918,10 @@ function getRequestTypeLabel(type: string): string {
                       :binary="true"
                       :input-id="`week-day-${index}`"
                     />
-                    <label :for="`week-day-${index}`" class="day-name">{{ weekDays[index] }}</label>
+                    <label :for="`week-day-${index}`" class="day-name">
+                      {{ formatDayWithDate(index) }}
+                      <span class="day-date-detail">({{ weekDatesForSelectedWeek[index] }})</span>
+                    </label>
                   </div>
                   
                   <div v-if="day.active" class="day-shifts">
@@ -1864,6 +1904,12 @@ function getRequestTypeLabel(type: string): string {
 .day-name {
   font-weight: 500;
   cursor: pointer;
+}
+
+.day-date-detail {
+  font-size: 0.85em;
+  color: var(--p-text-muted-color);
+  font-weight: 400;
 }
 
 .day-shifts {
