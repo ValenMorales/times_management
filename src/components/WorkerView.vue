@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import type { Worker, Payment, DaySchedule, EditRequest, TimeRecord } from '../types'
 import { useTimeTracker } from '../composables/useTimeTracker'
 import { formatDateLocal } from '../utils/timeHelpers'
@@ -38,6 +38,50 @@ const dailyEarnings = computed(() => tracker.getDailyEarnings(props.worker.id))
 const isHourly = computed(() => props.worker.paymentType === 'hourly')
 const historyData = computed(() => tracker.getHistory(props.worker.id))
 
+// Real-time update counter (updates every minute)
+const updateTick = ref(0)
+let updateInterval: ReturnType<typeof setInterval> | null = null
+
+// Calculate expected minutes for TODAY based on schedule
+const todayExpectedMinutes = computed(() => {
+  // Trigger reactivity on tick
+  void updateTick.value
+  
+  const today = new Date()
+  const dayOfWeek = today.getDay()
+  const daySchedule = props.worker.schedule?.[dayOfWeek]
+  
+  if (!daySchedule?.active) return 0
+  
+  let expectedMinutes = 0
+  for (const shift of daySchedule.shifts || []) {
+    const startParts = shift.start.split(':').map(Number)
+    const endParts = shift.end.split(':').map(Number)
+    const startH = startParts[0] ?? 0
+    const startM = startParts[1] ?? 0
+    const endH = endParts[0] ?? 0
+    const endM = endParts[1] ?? 0
+    expectedMinutes += (endH * 60 + endM) - (startH * 60 + startM)
+  }
+  
+  return expectedMinutes
+})
+
+// Live worked minutes (recalculates on tick)
+const liveWorkedMinutes = computed(() => {
+  void updateTick.value
+  return tracker.getWorkedMinutes(props.worker.id)
+})
+
+const liveWorkedTime = computed(() => tracker.formatWorkedTime(liveWorkedMinutes.value))
+const todayExpectedTime = computed(() => tracker.formatWorkedTime(todayExpectedMinutes.value))
+
+// Daily progress percentage
+const dailyProgressPercent = computed(() => {
+  if (todayExpectedMinutes.value === 0) return 0
+  return Math.round((liveWorkedMinutes.value / todayExpectedMinutes.value) * 100)
+})
+
 // Accumulated stats
 interface PeriodStats {
   periodLabel: string
@@ -48,7 +92,8 @@ interface PeriodStats {
   hoursWorked: string
   hoursExpected: string
   daysWorked: number
-  daysExpected: number // Días laborales esperados (sin descansos)
+  daysExpected: number // Días laborales esperados hasta ayer (para cálculos)
+  totalWorkDays: number // Total días laborales en el período
   daysInPeriod: number // Días calendario del período
   amountEarned: number
   amountExpected: number
@@ -73,6 +118,18 @@ async function loadPeriodStats() {
 
 onMounted(() => {
   loadPeriodStats()
+  
+  // Update live time every 30 seconds
+  updateInterval = setInterval(() => {
+    updateTick.value++
+  }, 30000)
+})
+
+onUnmounted(() => {
+  if (updateInterval) {
+    clearInterval(updateInterval)
+    updateInterval = null
+  }
 })
 
 // Reload stats when worker changes or when time records are added
@@ -505,9 +562,29 @@ onMounted(() => {
           </span>
         </div>
 
-        <div class="progress-section">
+        <!-- Progreso del DÍA ACTUAL (tiempo real) -->
+        <div class="progress-section daily-progress">
           <div class="progress-header">
-            <span>Progreso de horas</span>
+            <span><i class="pi pi-clock"></i> Progreso de hoy</span>
+            <span class="progress-percent" :class="{ 'positive': dailyProgressPercent >= 100 }">
+              {{ dailyProgressPercent }}%
+            </span>
+          </div>
+          <ProgressBar 
+            :value="Math.min(dailyProgressPercent, 100)" 
+            :showValue="false"
+            class="hours-progress daily"
+          />
+          <div class="progress-details">
+            <span>{{ liveWorkedTime }} trabajadas</span>
+            <span>{{ todayExpectedTime }} esperadas</span>
+          </div>
+        </div>
+
+        <!-- Progreso del PERÍODO (acumulado) -->
+        <div class="progress-section period-progress">
+          <div class="progress-header">
+            <span><i class="pi pi-calendar"></i> Acumulado del período</span>
             <span class="progress-percent" :class="{ 'positive': periodStats.percentComplete >= 100 }">
               {{ periodStats.percentComplete }}%
             </span>
@@ -526,12 +603,13 @@ onMounted(() => {
         <div class="accumulated-grid">
           <div class="accumulated-item">
             <span class="accumulated-label">Días trabajados</span>
-            <span class="accumulated-value">{{ periodStats.daysWorked }} / {{ periodStats.daysInPeriod }}</span>
-            <span class="accumulated-sublabel">({{ periodStats.daysExpected }} laborales)</span>
+            <span class="accumulated-value">{{ periodStats.daysWorked }} / {{ periodStats.totalWorkDays }}</span>
+            <span class="accumulated-sublabel">días laborales</span>
           </div>
-          <div class="accumulated-item earned">
-            <span class="accumulated-label">Ganado</span>
-            <span class="accumulated-value">${{ periodStats.amountEarned.toLocaleString() }}</span>
+          <div class="accumulated-item projection">
+            <span class="accumulated-label">Proyección Base</span>
+            <span class="accumulated-value">${{ periodStats.amountExpected.toLocaleString() }}</span>
+            <span class="accumulated-sublabel">Por {{ periodStats.hoursExpected }}</span>
           </div>
           <div class="accumulated-item" :class="periodStats.difference >= 0 ? 'bonus' : 'deduction'">
             <span class="accumulated-label">
@@ -539,6 +617,9 @@ onMounted(() => {
             </span>
             <span class="accumulated-value">
               {{ periodStats.difference >= 0 ? '+' : '' }}${{ periodStats.difference.toLocaleString() }}
+            </span>
+            <span class="accumulated-sublabel">
+              {{ periodStats.difference >= 0 ? '+' : '' }}{{ Math.round((periodStats.minutesWorked - periodStats.minutesExpected) / 60) }}h
             </span>
           </div>
           <div class="accumulated-item total">
@@ -1226,6 +1307,19 @@ onMounted(() => {
 
 .progress-section {
   margin-bottom: 1rem;
+  padding: 0.75rem;
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.progress-section.daily-progress {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(34, 197, 94, 0.02));
+  border: 1px solid rgba(34, 197, 94, 0.2);
+}
+
+.progress-section.period-progress {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .progress-header {
@@ -1234,6 +1328,11 @@ onMounted(() => {
   align-items: center;
   margin-bottom: 0.5rem;
   font-size: 0.85rem;
+}
+
+.progress-header i {
+  margin-right: 0.4rem;
+  font-size: 0.8rem;
 }
 
 .progress-percent {
@@ -1248,6 +1347,10 @@ onMounted(() => {
 .hours-progress {
   height: 8px;
   border-radius: 4px;
+}
+
+.hours-progress.daily :deep(.p-progressbar-value) {
+  background: linear-gradient(90deg, var(--success), #34d399);
 }
 
 .progress-details {
@@ -1278,6 +1381,15 @@ onMounted(() => {
 
 .accumulated-item.earned .accumulated-value {
   color: var(--success);
+}
+
+.accumulated-item.projection {
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+}
+
+.accumulated-item.projection .accumulated-value {
+  color: #818cf8;
 }
 
 .accumulated-item.deduction {
