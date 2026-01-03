@@ -141,12 +141,20 @@ watch([selectedWorkerId, selectedWeek], async ([workerId, week]) => {
   }
 }, { immediate: true })
 
-// Refresh payments when worker history changes
-watch(selectedWorkerHistory, async () => {
-  if (selectedWorkerId.value && activeTab.value === '3') {
-    await loadPayments()
-  }
+// Mark payments as needing refresh when worker history changes
+const paymentsNeedRefresh = ref(true)
+
+watch(selectedWorkerHistory, () => {
+  paymentsNeedRefresh.value = true
 }, { deep: true })
+
+// Refresh payments when switching to payments tab if needed
+watch(activeTab, async (newTab) => {
+  if (newTab === '3' && paymentsNeedRefresh.value && selectedWorkerId.value) {
+    await loadPayments()
+    paymentsNeedRefresh.value = false
+  }
+})
 
 async function loadWeekSchedule(workerId: string, weekStart: string) {
   isLoadingSchedule.value = true
@@ -1198,7 +1206,17 @@ function getRequestTypeLabel(type: string): string {
           <div v-if="selectedWorker" class="payments-section">
             <!-- Pending Payment -->
             <div v-if="pendingPayment" class="pending-payment-card">
-              <h3><i class="pi pi-wallet"></i> Acumulado Pendiente</h3>
+              <div class="pending-header">
+                <h3><i class="pi pi-wallet"></i> Acumulado Pendiente</h3>
+                <Button 
+                  icon="pi pi-refresh" 
+                  text 
+                  size="small"
+                  @click="loadPayments"
+                  :loading="isLoadingPayments"
+                  v-tooltip.left="'Recargar datos'"
+                />
+              </div>
               
               <div v-if="isLoadingPayments" class="loading-payments">
                 <i class="pi pi-spin pi-spinner"></i> Cargando...
@@ -2283,9 +2301,16 @@ function getRequestTypeLabel(type: string): string {
   margin-bottom: 1rem;
 }
 
-.pending-payment-card h3 {
-  color: var(--success);
+.pending-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   margin-bottom: 1rem;
+}
+
+.pending-header h3 {
+  color: var(--success);
+  margin: 0;
 }
 
 .payment-period {
