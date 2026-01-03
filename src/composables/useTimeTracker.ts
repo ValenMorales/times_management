@@ -867,14 +867,18 @@ export function useTimeTracker() {
       }
     }
 
-    // Calcular minutos y días esperados HASTA HOY (no hasta fin del período)
+    // Calcular minutos y días esperados
+    // IMPORTANTE: Solo contar días ANTERIORES a hoy para "esperado"
+    // El día de hoy no cuenta como "esperado" hasta que termine
     let minutesExpected = 0
     let daysExpected = 0
     const current = new Date(fromDate + 'T00:00:00')
+    const today = getTodayDateString()
     const end = new Date(endDate + 'T00:00:00')
     
     while (current <= end) {
       const dateStr = formatDateLocal(current)
+      const isToday = dateStr === today
       const dayOfWeek = current.getDay()
       const daySchedule = worker.schedule?.[dayOfWeek]
       
@@ -890,18 +894,20 @@ export function useTimeTracker() {
       
       // Verificar el tipo de día
       if (isVacationDay(workerId, dateStr)) {
-        // Día de vacaciones: cuenta para pago pero NO suma a esperado (no hay deducción)
+        // Día de vacaciones: cuenta para pago pero NO suma a esperado
         vacationDaysCount++
         vacationMinutes += dayExpectedMinutes
-        // NO sumamos a daysExpected ni minutesExpected - las vacaciones no generan deducción
-        // Pero sí contamos el día como "trabajado" para el pago
         if (!processedDates.has(dateStr)) {
           daysWorked++
         }
       } else if (!isRestDay(workerId, dateStr)) {
-        // Día laboral normal - suma a lo esperado
-        daysExpected++
-        minutesExpected += dayExpectedMinutes
+        // Día laboral normal
+        // Solo sumar a "esperado" si es un día ANTERIOR a hoy
+        // El día de hoy no cuenta hasta que termine (no puedes "deber" horas de un día en curso)
+        if (!isToday) {
+          daysExpected++
+          minutesExpected += dayExpectedMinutes
+        }
       }
       // Los días de descanso no suman a esperados
       
