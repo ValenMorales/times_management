@@ -141,6 +141,13 @@ watch([selectedWorkerId, selectedWeek], async ([workerId, week]) => {
   }
 }, { immediate: true })
 
+// Refresh payments when worker history changes
+watch(selectedWorkerHistory, async () => {
+  if (selectedWorkerId.value && activeTab.value === '3') {
+    await loadPayments()
+  }
+}, { deep: true })
+
 async function loadWeekSchedule(workerId: string, weekStart: string) {
   isLoadingSchedule.value = true
   try {

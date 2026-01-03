@@ -1482,8 +1482,22 @@ export function useTimeTracker() {
     const ws = getWorkerState(workerId)
     if (!ws) return []
     
+    // Combine history with currentDay if it has records
+    const allDays = [...ws.history]
+    
+    // Include currentDay if it has records and isn't already in history
+    if (ws.currentDay && ws.currentDay.records.length > 0) {
+      const currentDayInHistory = allDays.some(d => d.date === ws.currentDay!.date)
+      if (!currentDayInHistory) {
+        allDays.push({
+          ...ws.currentDay,
+          totalMinutes: calculateMinutes(ws.currentDay.records)
+        })
+      }
+    }
+    
     // Map and sort by date (most recent first)
-    return ws.history
+    return allDays
       .map(day => ({
         date: day.date,
         dateFormatted: new Date(day.date + 'T12:00:00').toLocaleDateString('es-ES', {
@@ -1491,7 +1505,7 @@ export function useTimeTracker() {
           day: 'numeric',
           month: 'short'
         }),
-        hoursWorked: formatWorkedTime(day.totalMinutes),
+        hoursWorked: formatWorkedTime(calculateMinutes(day.records)),
         records: day.records,
         status: day.records.some(r => r.type === 'end') ? 'Completo' : 'Incompleto',
         statusSeverity: day.records.some(r => r.type === 'end') ? 'success' : 'warn'
