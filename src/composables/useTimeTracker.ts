@@ -782,12 +782,12 @@ export function useTimeTracker() {
     fromDate: string, 
     toDate?: string
   ): { 
-    minutesWorked: number
-    minutesExpected: number
-    daysWorked: number
-    daysExpected: number
-    vacationDays: number
-    vacationMinutes: number
+    minutesWorked: number      // Minutos realmente trabajados (sin vacaciones)
+    minutesExpected: number    // Minutos esperados hasta toDate (excluyendo vacaciones y descansos)
+    daysWorked: number         // Días con registros de trabajo
+    daysExpected: number       // Días laborales esperados (sin descansos)
+    vacationDays: number       // Días de vacaciones en el período
+    vacationMinutes: number    // Minutos de vacaciones (para pago sin deducción)
     daysWorkedWithoutVacation: number // Días efectivamente trabajados (para subsidio de transporte)
   } {
     const ws = getWorkerState(workerId)
@@ -800,9 +800,9 @@ export function useTimeTracker() {
     const startTimestamp = new Date(fromDate + 'T00:00:00').getTime()
     const endTimestamp = new Date(endDate + 'T23:59:59').getTime()
     
-    let minutesWorked = 0
+    let minutesWorked = 0      // Solo minutos realmente trabajados
     let daysWorked = 0
-    let daysWorkedWithoutVacation = 0 // Para el subsidio de transporte
+    let daysWorkedWithoutVacation = 0
     let vacationDaysCount = 0
     let vacationMinutes = 0
     const processedDates = new Set<string>()
@@ -819,17 +819,14 @@ export function useTimeTracker() {
       tempCurrent.setDate(tempCurrent.getDate() + 1)
     }
 
-    // Contar del historial
+    // Contar del historial - SOLO horas realmente trabajadas
     for (const day of ws.history) {
       const dayTimestamp = new Date(day.date + 'T12:00:00').getTime()
       if (dayTimestamp >= startTimestamp && dayTimestamp <= endTimestamp && !processedDates.has(day.date)) {
-        // Recalcular minutos directamente de los registros para evitar datos corruptos
         const actualMinutes = calculateMinutes(day.records || [])
         minutesWorked += actualMinutes
-        // Contar como día trabajado solo si tiene registros válidos y minutos > 0
         if (day.records && day.records.length > 0 && actualMinutes > 0) {
           daysWorked++
-          // Si no es día de vacaciones, cuenta para el subsidio de transporte
           if (!vacationDatesInPeriod.has(day.date)) {
             daysWorkedWithoutVacation++
           }
@@ -844,7 +841,6 @@ export function useTimeTracker() {
       if (currentTimestamp >= startTimestamp && currentTimestamp <= endTimestamp && !processedDates.has(ws.currentDay.date)) {
         minutesWorked += getWorkedMinutes(workerId)
         daysWorked++
-        // Si no es día de vacaciones, cuenta para el subsidio de transporte
         if (!vacationDatesInPeriod.has(ws.currentDay.date)) {
           daysWorkedWithoutVacation++
         }
@@ -852,7 +848,7 @@ export function useTimeTracker() {
       }
     }
 
-    // Calcular minutos y días esperados
+    // Calcular minutos y días esperados HASTA HOY (no hasta fin del período)
     let minutesExpected = 0
     let daysExpected = 0
     const current = new Date(fromDate + 'T00:00:00')
@@ -875,23 +871,20 @@ export function useTimeTracker() {
       
       // Verificar el tipo de día
       if (isVacationDay(workerId, dateStr)) {
-        // Día de vacaciones: NO se descuenta del salario base, cuenta como trabajado
+        // Día de vacaciones: cuenta para pago pero NO suma a esperado (no hay deducción)
         vacationDaysCount++
         vacationMinutes += dayExpectedMinutes
-        // Agregar a minutesWorked si no se trabajó ese día (para que no descuente del salario base)
+        // NO sumamos a daysExpected ni minutesExpected - las vacaciones no generan deducción
+        // Pero sí contamos el día como "trabajado" para el pago
         if (!processedDates.has(dateStr)) {
-          minutesWorked += dayExpectedMinutes
           daysWorked++
-          // NOTA: No incrementamos daysWorkedWithoutVacation porque es día de vacaciones
         }
-        daysExpected++
-        minutesExpected += dayExpectedMinutes
       } else if (!isRestDay(workerId, dateStr)) {
-        // Día laboral normal
+        // Día laboral normal - suma a lo esperado
         daysExpected++
         minutesExpected += dayExpectedMinutes
       }
-      // Los días de descanso (rest days y extra rest days) no suman a esperados
+      // Los días de descanso no suman a esperados
       
       current.setDate(current.getDate() + 1)
     }
@@ -928,6 +921,7 @@ export function useTimeTracker() {
     daysInPeriod: number // Días calendario del período
     daysWorkedWithoutVacation: number
     vacationDays: number
+    vacationMinutes: number // Minutos de vacaciones (pagados pero no trabajados)
     baseSalaryEarned: number // Salario base proporcional
     baseSalaryExpected: number
     transportSubsidyEarned: number // Subsidio de transporte (por día trabajado sin vacaciones)
@@ -952,6 +946,7 @@ export function useTimeTracker() {
         daysInPeriod: 0,
         daysWorkedWithoutVacation: 0,
         vacationDays: 0,
+        vacationMinutes: 0,
         baseSalaryEarned: 0,
         baseSalaryExpected: 0,
         transportSubsidyEarned: 0,
@@ -993,10 +988,12 @@ export function useTimeTracker() {
     let baseSalaryExpected = 0
     let transportSubsidyEarned = 0
 
+    // Minutos trabajados + vacaciones (para el pago)
+    const minutesForPayment = accumulated.minutesWorked + accumulated.vacationMinutes
+
     if (worker.paymentType === 'hourly') {
       baseSalaryEarned = Math.round((accumulated.minutesWorked / 60) * (worker.hourlyRate || 0) * 100) / 100
       baseSalaryExpected = Math.round((accumulated.minutesExpected / 60) * (worker.hourlyRate || 0) * 100) / 100
-      // Trabajadores por hora no tienen subsidio de transporte típicamente
     } else {
       // Mensual - calcular proporcionalmente el salario base
       const monthlyMinutes = getMonthlyExpectedMinutes(worker)
@@ -1004,58 +1001,47 @@ export function useTimeTracker() {
       
       if (monthlyMinutes > 0) {
         const ratePerMinute = monthlySalary / monthlyMinutes
-        baseSalaryEarned = Math.round(accumulated.minutesWorked * ratePerMinute * 100) / 100
         
-        // Para quincenas: usar minutos esperados estándar (mensual/2)
-        // Esto evita penalizar en febrero u otros meses cortos
-        if (period === 'biweekly') {
-          const biweeklyMinutes = getBiweeklyExpectedMinutes(worker)
-          const completionFactor = getBiweeklyCompletionFactor(periodStart, periodEnd)
-          // Minutos esperados = quincena estándar * factor de completitud
-          const adjustedExpectedMinutes = biweeklyMinutes * completionFactor
-          baseSalaryExpected = Math.round(adjustedExpectedMinutes * ratePerMinute * 100) / 100
-        } else {
-          baseSalaryExpected = Math.round(accumulated.minutesExpected * ratePerMinute * 100) / 100
-        }
+        // Salario ganado = horas trabajadas + horas de vacaciones (vacaciones se pagan)
+        baseSalaryEarned = Math.round(minutesForPayment * ratePerMinute * 100) / 100
+        
+        // Salario esperado = horas esperadas hasta hoy (sin vacaciones, ya están pagadas aparte)
+        baseSalaryExpected = Math.round(accumulated.minutesExpected * ratePerMinute * 100) / 100
       }
       
       // Calcular subsidio de transporte (por día trabajado, NO en vacaciones)
-      // El subsidio mensual se divide entre 30 días (mes estándar)
       if (worker.transportSubsidy && worker.transportSubsidy > 0) {
         const dailyTransportSubsidy = getDailyTransportSubsidy(worker.transportSubsidy)
-        // Solo se paga por días efectivamente trabajados (sin vacaciones)
         transportSubsidyEarned = Math.round(accumulated.daysWorkedWithoutVacation * dailyTransportSubsidy * 100) / 100
       }
     }
 
     const amountEarned = baseSalaryEarned + transportSubsidyEarned
-    const amountExpected = baseSalaryExpected + transportSubsidyEarned // El transporte ganado es el esperado si trabajó
-    // Para quincenas, calcular minutos esperados ajustados
-    let adjustedMinutesExpected = accumulated.minutesExpected
-    if (period === 'biweekly' && worker.paymentType !== 'hourly') {
-      const biweeklyMinutes = getBiweeklyExpectedMinutes(worker)
-      const completionFactor = getBiweeklyCompletionFactor(periodStart, periodEnd)
-      adjustedMinutesExpected = Math.round(biweeklyMinutes * completionFactor)
-    }
+    const amountExpected = baseSalaryExpected + transportSubsidyEarned
 
-    const difference = baseSalaryEarned - baseSalaryExpected // Solo la diferencia del salario base
-    const percentComplete = adjustedMinutesExpected > 0 
-      ? Math.round((accumulated.minutesWorked / adjustedMinutesExpected) * 100)
-      : 0
+    // Diferencia: si trabajó más de lo esperado = positivo (extra), si menos = negativo (deducción)
+    // Las vacaciones ya están incluidas en baseSalaryEarned, así que no causan deducción
+    const difference = baseSalaryEarned - baseSalaryExpected
+
+    // Porcentaje completado basado en horas esperadas hasta hoy
+    const percentComplete = accumulated.minutesExpected > 0 
+      ? Math.round((accumulated.minutesWorked / accumulated.minutesExpected) * 100)
+      : 100 // Si no hay horas esperadas (solo vacaciones), está al 100%
 
     return {
       periodLabel,
       periodStart,
       periodEnd,
       minutesWorked: accumulated.minutesWorked,
-      minutesExpected: adjustedMinutesExpected,
+      minutesExpected: accumulated.minutesExpected,
       hoursWorked: formatWorkedTime(accumulated.minutesWorked),
-      hoursExpected: formatWorkedTime(adjustedMinutesExpected),
+      hoursExpected: formatWorkedTime(accumulated.minutesExpected),
       daysWorked: accumulated.daysWorked,
       daysExpected: accumulated.daysExpected,
       daysInPeriod,
       daysWorkedWithoutVacation: accumulated.daysWorkedWithoutVacation,
       vacationDays: accumulated.vacationDays,
+      vacationMinutes: accumulated.vacationMinutes, // Para mostrar horas de vacaciones
       baseSalaryEarned,
       baseSalaryExpected,
       transportSubsidyEarned,
@@ -1080,34 +1066,6 @@ export function useTimeTracker() {
       }
     }
     return weeklyMinutes * 4.33
-  }
-
-  // Helper para obtener minutos esperados de una quincena (siempre la mitad del mes)
-  // Esto asegura que en febrero (28/29 días) no se penalice al trabajador
-  function getBiweeklyExpectedMinutes(worker: Worker): number {
-    return getMonthlyExpectedMinutes(worker) / 2
-  }
-
-  // Obtener el factor de proporción para quincenas parciales
-  // Por ejemplo, si estamos del 16 al 25 de un mes, es una quincena parcial
-  function getBiweeklyCompletionFactor(periodStart: string, periodEnd: string): number {
-    const start = new Date(periodStart + 'T00:00:00')
-    const end = new Date(periodEnd + 'T00:00:00')
-    const startDay = start.getDate()
-    
-    // Días transcurridos en el período
-    const diffTime = end.getTime() - start.getTime()
-    const daysInPeriod = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1
-    
-    // Una quincena estándar tiene 15 días
-    // Si es primera quincena (empieza el 1)
-    if (startDay <= 15) {
-      return Math.min(daysInPeriod / 15, 1)
-    }
-    
-    // Si es segunda quincena (empieza el 16)
-    // Siempre usar 15 como base, aunque el mes tenga 28, 30 o 31 días
-    return Math.min(daysInPeriod / 15, 1)
   }
 
   // Helper to get today's date string in local timezone
