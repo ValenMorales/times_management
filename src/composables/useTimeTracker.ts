@@ -1370,7 +1370,8 @@ export function useTimeTracker() {
     }
     
     await setDoc(doc(db, 'workerStates', workerId), state)
-    workerStates.value[workerId] = state
+    // Force reactivity update by creating a new object
+    workerStates.value = { ...workerStates.value, [workerId]: state }
   }
 
   // Statistics
@@ -1611,7 +1612,8 @@ export function useTimeTracker() {
     if (!updated) return
     
     await setDoc(doc(db, 'workerStates', workerId), newState)
-    workerStates.value[workerId] = newState
+    // Force reactivity update
+    workerStates.value = { ...workerStates.value, [workerId]: newState }
   }
 
   async function deleteRecord(workerId: string, date: string, recordIndex: number) {
@@ -1636,8 +1638,8 @@ export function useTimeTracker() {
     
     await setDoc(doc(db, 'workerStates', workerId), state)
     
-    // Force local update
-    workerStates.value[workerId] = state
+    // Force reactivity update
+    workerStates.value = { ...workerStates.value, [workerId]: state }
   }
 
   // Eliminar un día completo del historial
@@ -1662,8 +1664,8 @@ export function useTimeTracker() {
     
     await setDoc(doc(db, 'workerStates', workerId), state)
     
-    // Force local update
-    workerStates.value[workerId] = state
+    // Force reactivity update
+    workerStates.value = { ...workerStates.value, [workerId]: state }
   }
 
   function calculateMinutes(records: TimeRecord[]): number {
