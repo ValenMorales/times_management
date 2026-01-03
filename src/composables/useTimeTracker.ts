@@ -44,11 +44,30 @@ function generateId(): string {
 }
 
 function parseTime(timeStr: string): { hours: number; minutes: number } {
-  const parts = timeStr.split(':')
-  return {
-    hours: parseInt(parts[0] || '0', 10),
-    minutes: parseInt(parts[1] || '0', 10)
+  // Handle both "15:00" and "3:00 PM" formats
+  const normalized = timeStr.trim().toUpperCase()
+  
+  // Check for AM/PM format
+  const isPM = normalized.includes('PM') || normalized.includes('P.M') || normalized.includes('P. M')
+  const isAM = normalized.includes('AM') || normalized.includes('A.M') || normalized.includes('A. M')
+  
+  // Remove AM/PM and dots
+  const cleaned = normalized
+    .replace(/\s*(A\.?\s*M\.?|P\.?\s*M\.?)\s*$/i, '')
+    .trim()
+  
+  const parts = cleaned.split(':')
+  let hours = parseInt(parts[0] || '0', 10)
+  const minutes = parseInt(parts[1] || '0', 10)
+  
+  // Convert to 24-hour format if AM/PM was present
+  if (isPM && hours !== 12) {
+    hours += 12
+  } else if (isAM && hours === 12) {
+    hours = 0
   }
+  
+  return { hours, minutes }
 }
 
 function formatTime12h(date: Date): string {
@@ -984,29 +1003,32 @@ export function useTimeTracker() {
     const accumulated = calculateAccumulated(workerId, periodStart, periodEnd)
 
     // Calcular montos de salario base
-    let baseSalaryEarned = 0
-    let baseSalaryExpected = 0
+    let workedSalary = 0      // Pago por horas trabajadas
+    let vacationSalary = 0    // Pago por vacaciones
+    let expectedSalary = 0    // Pago esperado hasta hoy
     let transportSubsidyEarned = 0
-
-    // Minutos trabajados + vacaciones (para el pago)
-    const minutesForPayment = accumulated.minutesWorked + accumulated.vacationMinutes
+    let ratePerMinute = 0
 
     if (worker.paymentType === 'hourly') {
-      baseSalaryEarned = Math.round((accumulated.minutesWorked / 60) * (worker.hourlyRate || 0) * 100) / 100
-      baseSalaryExpected = Math.round((accumulated.minutesExpected / 60) * (worker.hourlyRate || 0) * 100) / 100
+      ratePerMinute = (worker.hourlyRate || 0) / 60
+      workedSalary = Math.round((accumulated.minutesWorked / 60) * (worker.hourlyRate || 0) * 100) / 100
+      expectedSalary = Math.round((accumulated.minutesExpected / 60) * (worker.hourlyRate || 0) * 100) / 100
     } else {
       // Mensual - calcular proporcionalmente el salario base
       const monthlyMinutes = getMonthlyExpectedMinutes(worker)
       const monthlySalary = worker.monthlySalary || 0
       
       if (monthlyMinutes > 0) {
-        const ratePerMinute = monthlySalary / monthlyMinutes
+        ratePerMinute = monthlySalary / monthlyMinutes
         
-        // Salario ganado = horas trabajadas + horas de vacaciones (vacaciones se pagan)
-        baseSalaryEarned = Math.round(minutesForPayment * ratePerMinute * 100) / 100
+        // Salario por horas realmente trabajadas
+        workedSalary = Math.round(accumulated.minutesWorked * ratePerMinute * 100) / 100
         
-        // Salario esperado = horas esperadas hasta hoy (sin vacaciones, ya están pagadas aparte)
-        baseSalaryExpected = Math.round(accumulated.minutesExpected * ratePerMinute * 100) / 100
+        // Salario por vacaciones (pagadas pero no trabajadas)
+        vacationSalary = Math.round(accumulated.vacationMinutes * ratePerMinute * 100) / 100
+        
+        // Salario esperado = horas esperadas hasta hoy
+        expectedSalary = Math.round(accumulated.minutesExpected * ratePerMinute * 100) / 100
       }
       
       // Calcular subsidio de transporte (por día trabajado, NO en vacaciones)
@@ -1016,17 +1038,23 @@ export function useTimeTracker() {
       }
     }
 
+    // Diferencia: comparar SOLO horas trabajadas vs horas esperadas
+    // Si trabajó 9h y esperaba 8h = +1h extra = diferencia positiva
+    // Si trabajó 7h y esperaba 8h = -1h = diferencia negativa (deducción)
+    const minutesDifference = accumulated.minutesWorked - accumulated.minutesExpected
+    const difference = Math.round(minutesDifference * ratePerMinute * 100) / 100
+
+    // Salario total ganado = trabajo + vacaciones
+    const baseSalaryEarned = workedSalary + vacationSalary
+    const baseSalaryExpected = expectedSalary + vacationSalary // Vacaciones siempre se pagan
+
     const amountEarned = baseSalaryEarned + transportSubsidyEarned
     const amountExpected = baseSalaryExpected + transportSubsidyEarned
-
-    // Diferencia: si trabajó más de lo esperado = positivo (extra), si menos = negativo (deducción)
-    // Las vacaciones ya están incluidas en baseSalaryEarned, así que no causan deducción
-    const difference = baseSalaryEarned - baseSalaryExpected
 
     // Porcentaje completado basado en horas esperadas hasta hoy
     const percentComplete = accumulated.minutesExpected > 0 
       ? Math.round((accumulated.minutesWorked / accumulated.minutesExpected) * 100)
-      : 100 // Si no hay horas esperadas (solo vacaciones), está al 100%
+      : 100
 
     return {
       periodLabel,
