@@ -73,6 +73,8 @@ export function useTimeTracker() {
   const workerStates = ref<Record<string, WorkerState>>({})
   const isLoading = ref(true)
   const currentTime = ref(new Date())
+  // Version counter to force reactivity in computed properties
+  const stateVersion = ref(0)
   
   let timeInterval: number | null = null
   let unsubscribeWorkers: Unsubscribe | null = null
@@ -1370,8 +1372,9 @@ export function useTimeTracker() {
     }
     
     await setDoc(doc(db, 'workerStates', workerId), state)
-    // Force reactivity update by creating a new object
+    // Force reactivity update
     workerStates.value = { ...workerStates.value, [workerId]: state }
+    stateVersion.value++
   }
 
   // Statistics
@@ -1614,6 +1617,7 @@ export function useTimeTracker() {
     await setDoc(doc(db, 'workerStates', workerId), newState)
     // Force reactivity update
     workerStates.value = { ...workerStates.value, [workerId]: newState }
+    stateVersion.value++
   }
 
   async function deleteRecord(workerId: string, date: string, recordIndex: number) {
@@ -1640,6 +1644,7 @@ export function useTimeTracker() {
     
     // Force reactivity update
     workerStates.value = { ...workerStates.value, [workerId]: state }
+    stateVersion.value++
   }
 
   // Eliminar un día completo del historial
@@ -1666,6 +1671,7 @@ export function useTimeTracker() {
     
     // Force reactivity update
     workerStates.value = { ...workerStates.value, [workerId]: state }
+    stateVersion.value++
   }
 
   function calculateMinutes(records: TimeRecord[]): number {
@@ -1688,6 +1694,7 @@ export function useTimeTracker() {
     isLoading,
     currentTimeFormatted,
     todayFormatted,
+    stateVersion, // Reactive trigger for computed properties
     // Admin
     getAdmin,
     setAdminPin,

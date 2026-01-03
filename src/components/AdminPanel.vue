@@ -115,6 +115,10 @@ const historyOrderOptions = [
 ]
 
 const selectedWorkerHistory = computed(() => {
+  // Depend on stateVersion to force recalculation when records change
+  const _version = tracker.stateVersion.value
+  void _version // Use it to avoid unused variable warning
+  
   if (!selectedWorkerId.value) return []
   const history = tracker.getHistory(selectedWorkerId.value)
   
