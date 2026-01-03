@@ -657,15 +657,24 @@ export function useTimeTracker() {
       const requestRef = doc(db, 'editRequests', requestId)
       const requestSnap = await getDocs(query(collection(db, 'editRequests'), where('id', '==', requestId)))
       
-      if (requestSnap.empty) return false
+      if (requestSnap.empty) {
+        console.error('Edit request not found:', requestId)
+        return false
+      }
       
       const request = { id: requestSnap.docs[0]!.id, ...requestSnap.docs[0]!.data() } as EditRequest
       
+      console.log('Applying edit request:', request)
+      
       // Aplicar el cambio según el tipo de solicitud
+      let success = false
+      
       if (request.requestType === 'edit' && request.requestedValue) {
-        await updateRecord(request.workerId, request.date, request.recordIndex, request.requestedValue)
+        console.log('Updating record:', request.date, request.recordIndex, request.requestedValue)
+        success = await updateRecord(request.workerId, request.date, request.recordIndex, request.requestedValue)
       } else if (request.requestType === 'add' && request.requestedValue) {
-        await addRecordToDate(
+        console.log('Adding record:', request.date, request.requestedValue)
+        success = await addRecordToDate(
           request.workerId, 
           request.date, 
           request.requestedValue.type,
@@ -673,7 +682,14 @@ export function useTimeTracker() {
           request.requestedValue.photo || undefined
         )
       } else if (request.requestType === 'delete') {
-        await deleteRecord(request.workerId, request.date, request.recordIndex)
+        console.log('Deleting record:', request.date, request.recordIndex)
+        success = await deleteRecord(request.workerId, request.date, request.recordIndex)
+      }
+      
+      if (!success) {
+        console.error('Failed to apply edit request changes')
+        // Aún así marcamos como aprobada, pero añadimos nota de error
+        adminNote = (adminNote || '') + ' [ADVERTENCIA: Posible error al aplicar cambios]'
       }
       
       // Actualizar el estado de la solicitud
@@ -684,6 +700,7 @@ export function useTimeTracker() {
         adminNote: adminNote || ''
       })
       
+      console.log('Edit request approved successfully')
       return true
     } catch (error) {
       console.error('Error approving request:', error)
@@ -796,23 +813,25 @@ export function useTimeTracker() {
   }
 
   // Calcular acumulado desde una fecha hasta hoy (o hasta otra fecha)
-  function calculateAccumulated(
+  // NOTA: Esta función es async porque necesita obtener horarios semanales personalizados
+  async function calculateAccumulated(
     workerId: string, 
     fromDate: string, 
     toDate?: string
-  ): { 
+  ): Promise<{ 
     minutesWorked: number      // Minutos realmente trabajados (sin vacaciones)
     minutesExpected: number    // Minutos esperados hasta toDate (excluyendo vacaciones y descansos)
     daysWorked: number         // Días con registros de trabajo
-    daysExpected: number       // Días laborales esperados (sin descansos)
+    daysExpected: number       // Días laborales esperados hasta ayer (para cálculos)
+    totalWorkDays: number      // Total días laborales en el período (para mostrar)
     vacationDays: number       // Días de vacaciones en el período
     vacationMinutes: number    // Minutos de vacaciones (para pago sin deducción)
     daysWorkedWithoutVacation: number // Días efectivamente trabajados (para subsidio de transporte)
-  } {
+  }> {
     const ws = getWorkerState(workerId)
     const worker = getWorker(workerId)
     if (!ws || !worker) {
-      return { minutesWorked: 0, minutesExpected: 0, daysWorked: 0, daysExpected: 0, vacationDays: 0, vacationMinutes: 0, daysWorkedWithoutVacation: 0 }
+      return { minutesWorked: 0, minutesExpected: 0, daysWorked: 0, daysExpected: 0, totalWorkDays: 0, vacationDays: 0, vacationMinutes: 0, daysWorkedWithoutVacation: 0 }
     }
 
     const endDate = toDate || getTodayDateString()
@@ -826,6 +845,45 @@ export function useTimeTracker() {
     let vacationMinutes = 0
     const processedDates = new Set<string>()
     const vacationDatesInPeriod = new Set<string>()
+
+    // Pre-cargar todos los horarios semanales del período
+    // Esto evita múltiples llamadas a Firestore
+    const weekScheduleCache: Map<string, DaySchedule[]> = new Map()
+    const tempDate = new Date(fromDate + 'T00:00:00')
+    const tempEndDate = new Date(endDate + 'T00:00:00')
+    const weeksToFetch = new Set<string>()
+    
+    while (tempDate <= tempEndDate) {
+      const weekStart = getWeekStartDate(tempDate)
+      weeksToFetch.add(weekStart)
+      tempDate.setDate(tempDate.getDate() + 7)
+    }
+    
+    // Cargar horarios de todas las semanas necesarias
+    for (const weekStart of weeksToFetch) {
+      const weekSchedule = await getWeekSchedule(workerId, weekStart)
+      if (weekSchedule) {
+        weekScheduleCache.set(weekStart, weekSchedule.schedule)
+      }
+    }
+    
+    // Guardar referencia al horario base del trabajador (ya verificamos que worker no es null)
+    const workerBaseSchedule = worker.schedule
+    
+    // Función helper para obtener el horario de un día específico
+    function getScheduleForDate(date: Date): DaySchedule | undefined {
+      const weekStart = getWeekStartDate(date)
+      const dayOfWeek = date.getDay()
+      
+      // Primero buscar en horarios personalizados de la semana
+      const customSchedule = weekScheduleCache.get(weekStart)
+      if (customSchedule && customSchedule[dayOfWeek]) {
+        return customSchedule[dayOfWeek]
+      }
+      
+      // Si no hay horario personalizado, usar el horario base del trabajador
+      return workerBaseSchedule?.[dayOfWeek]
+    }
 
     // Primero identificar días de vacaciones en el período
     const tempCurrent = new Date(fromDate + 'T00:00:00')
@@ -879,8 +937,9 @@ export function useTimeTracker() {
     while (current <= end) {
       const dateStr = formatDateLocal(current)
       const isToday = dateStr === today
-      const dayOfWeek = current.getDay()
-      const daySchedule = worker.schedule?.[dayOfWeek]
+      
+      // USAR EL HORARIO PERSONALIZADO O BASE PARA ESTE DÍA
+      const daySchedule = getScheduleForDate(current)
       
       // Calcular minutos esperados para un día laboral normal
       let dayExpectedMinutes = 0
@@ -914,11 +973,27 @@ export function useTimeTracker() {
       current.setDate(current.getDate() + 1)
     }
 
+    // Calcular TOTAL de días laborales en el período (incluyendo hoy)
+    // Esto es para mostrar al usuario cuántos días laborales hay en total
+    let totalWorkDays = 0
+    const countCurrent = new Date(fromDate + 'T00:00:00')
+    while (countCurrent <= end) {
+      const dateStr = formatDateLocal(countCurrent)
+      const daySchedule = getScheduleForDate(countCurrent)
+      
+      // Es día laboral si tiene horario activo, no es descanso extra, y no es vacación
+      if (daySchedule?.active && !isRestDay(workerId, dateStr) && !isVacationDay(workerId, dateStr)) {
+        totalWorkDays++
+      }
+      countCurrent.setDate(countCurrent.getDate() + 1)
+    }
+
     return { 
       minutesWorked, 
       minutesExpected, 
       daysWorked, 
       daysExpected, 
+      totalWorkDays,
       vacationDays: vacationDaysCount, 
       vacationMinutes,
       daysWorkedWithoutVacation
@@ -942,7 +1017,8 @@ export function useTimeTracker() {
     hoursWorked: string
     hoursExpected: string
     daysWorked: number
-    daysExpected: number // Días laborales esperados (sin descansos)
+    daysExpected: number // Días laborales esperados hasta ayer (para cálculos)
+    totalWorkDays: number // Total días laborales en el período (para mostrar)
     daysInPeriod: number // Días calendario del período
     daysWorkedWithoutVacation: number
     vacationDays: number
@@ -968,6 +1044,7 @@ export function useTimeTracker() {
         hoursExpected: '0h 0m',
         daysWorked: 0,
         daysExpected: 0,
+        totalWorkDays: 0,
         daysInPeriod: 0,
         daysWorkedWithoutVacation: 0,
         vacationDays: 0,
@@ -1006,7 +1083,7 @@ export function useTimeTracker() {
     const endDate = new Date(periodEnd + 'T00:00:00')
     const daysInPeriod = Math.round((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1
 
-    const accumulated = calculateAccumulated(workerId, periodStart, periodEnd)
+    const accumulated = await calculateAccumulated(workerId, periodStart, periodEnd)
 
     // Calcular montos de salario base
     let workedSalary = 0      // Pago por horas trabajadas
@@ -1072,6 +1149,7 @@ export function useTimeTracker() {
       hoursExpected: formatWorkedTime(accumulated.minutesExpected),
       daysWorked: accumulated.daysWorked,
       daysExpected: accumulated.daysExpected,
+      totalWorkDays: accumulated.totalWorkDays,
       daysInPeriod,
       daysWorkedWithoutVacation: accumulated.daysWorkedWithoutVacation,
       vacationDays: accumulated.vacationDays,
@@ -1308,16 +1386,26 @@ export function useTimeTracker() {
     await setDoc(doc(db, 'workerStates', workerId), state)
   }
 
-  // Add a record to any date (for admin manual entry)
+  // Add a record to any date (for admin manual entry or approved edit requests)
   async function addRecordToDate(
     workerId: string, 
     date: string, 
     type: TimeRecord['type'], 
     time: string,
     photo?: string
-  ) {
-    const currentState = workerStates.value[workerId]
-    if (!currentState) return
+  ): Promise<boolean> {
+    let currentState = workerStates.value[workerId]
+    
+    // Si no existe el estado, crearlo
+    if (!currentState) {
+      const initialState: WorkerState = {
+        currentDay: null,
+        history: []
+      }
+      await setDoc(doc(db, 'workerStates', workerId), initialState)
+      workerStates.value[workerId] = initialState
+      currentState = initialState
+    }
     
     const state: WorkerState = JSON.parse(JSON.stringify(currentState))
     const today = getTodayDateString()
@@ -1383,6 +1471,7 @@ export function useTimeTracker() {
     // Force reactivity update
     workerStates.value = { ...workerStates.value, [workerId]: state }
     stateVersion.value++
+    return true
   }
 
   // Statistics
@@ -1579,9 +1668,12 @@ export function useTimeTracker() {
   }
 
   // Record editing
-  async function updateRecord(workerId: string, date: string, recordIndex: number, updates: Partial<TimeRecord>) {
+  async function updateRecord(workerId: string, date: string, recordIndex: number, updates: Partial<TimeRecord>): Promise<boolean> {
     const currentState = workerStates.value[workerId]
-    if (!currentState) return
+    if (!currentState) {
+      console.error('updateRecord: No state found for worker', workerId)
+      return false
+    }
 
     // If time is being updated, also update the timestamp
     if (updates.time) {
@@ -1620,32 +1712,47 @@ export function useTimeTracker() {
       }
     }
     
-    if (!updated) return
+    if (!updated) {
+      console.error('updateRecord: Record not found at index', recordIndex, 'for date', date)
+      return false
+    }
     
     await setDoc(doc(db, 'workerStates', workerId), newState)
     // Force reactivity update
     workerStates.value = { ...workerStates.value, [workerId]: newState }
     stateVersion.value++
+    return true
   }
 
-  async function deleteRecord(workerId: string, date: string, recordIndex: number) {
+  async function deleteRecord(workerId: string, date: string, recordIndex: number): Promise<boolean> {
     const currentState = workerStates.value[workerId]
-    if (!currentState) return
+    if (!currentState) {
+      console.error('deleteRecord: No state found for worker', workerId)
+      return false
+    }
 
     // Create a deep copy to ensure reactivity
     const state: WorkerState = JSON.parse(JSON.stringify(currentState))
+    let deleted = false
 
     // First check if date exists in history
     const dayLog = state.history.find(d => d.date === date)
     
-    if (dayLog) {
+    if (dayLog && dayLog.records[recordIndex]) {
       // Date found in history - delete from there
       dayLog.records.splice(recordIndex, 1)
       dayLog.totalMinutes = calculateMinutes(dayLog.records)
-    } else if (state.currentDay?.date === date) {
+      deleted = true
+    } else if (state.currentDay?.date === date && state.currentDay.records[recordIndex]) {
       // Check currentDay regardless of whether it's today (could be stale)
       state.currentDay.records.splice(recordIndex, 1)
       state.currentDay.totalMinutes = calculateMinutes(state.currentDay.records)
+      deleted = true
+    }
+    
+    if (!deleted) {
+      console.error('deleteRecord: Record not found at index', recordIndex, 'for date', date)
+      return false
     }
     
     await setDoc(doc(db, 'workerStates', workerId), state)
@@ -1653,6 +1760,7 @@ export function useTimeTracker() {
     // Force reactivity update
     workerStates.value = { ...workerStates.value, [workerId]: state }
     stateVersion.value++
+    return true
   }
 
   // Eliminar un día completo del historial
