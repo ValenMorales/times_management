@@ -1328,6 +1328,7 @@ export function useTimeTracker() {
     if (!currentState) return
     
     const state: WorkerState = JSON.parse(JSON.stringify(currentState))
+    const today = getTodayDateString()
     
     const record: TimeRecord = {
       type,
@@ -1336,9 +1337,8 @@ export function useTimeTracker() {
       photo: photo || null
     }
     
-    // Check if the date exists in currentDay first
-    if (state.currentDay?.date === date) {
-      // Add to currentDay
+    // If adding to TODAY and currentDay is today, add to currentDay
+    if (date === today && state.currentDay?.date === today) {
       state.currentDay.records.push(record)
       state.currentDay.records.sort((a, b) => a.timestamp - b.timestamp)
       state.currentDay.totalMinutes = calculateMinutes(state.currentDay.records)
@@ -1353,11 +1353,27 @@ export function useTimeTracker() {
         }
       }
     } else {
-      // Check if date exists in history
+      // Adding to a past date (or future) - ALWAYS add to history
+      
+      // First, if currentDay has the same date (stale currentDay), merge it to history
+      if (state.currentDay?.date === date && state.currentDay.records.length > 0) {
+        const existingEntry = state.history.find(d => d.date === date)
+        if (existingEntry) {
+          // Merge records from currentDay to existing history entry
+          existingEntry.records.push(...state.currentDay.records)
+          existingEntry.records.sort((a, b) => a.timestamp - b.timestamp)
+        } else {
+          // Move currentDay to history
+          state.history.push({ ...state.currentDay })
+        }
+        // Clear currentDay since it's stale
+        state.currentDay = null
+      }
+      
+      // Now add the new record to history
       let dayLog = state.history.find(d => d.date === date)
       
       if (!dayLog) {
-        // Create new day entry in history
         dayLog = {
           date,
           records: [],
