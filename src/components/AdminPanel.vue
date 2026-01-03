@@ -19,6 +19,7 @@ import ConfirmDialog from 'primevue/confirmdialog'
 import { useConfirm } from 'primevue/useconfirm'
 import { useToast } from 'primevue/usetoast'
 import Toast from 'primevue/toast'
+import { parseTimeString } from '../utils/timeHelpers'
 
 const emit = defineEmits<{
   (e: 'logout'): void
@@ -87,6 +88,9 @@ const newRestDay = ref<Date | null>(null)
 // Record editing
 const showRecordDialog = ref(false)
 const editingRecord = ref<{ date: string; index: number; record: TimeRecord } | null>(null)
+const editRecordHours = ref(9)
+const editRecordMinutes = ref(0)
+const editRecordPeriod = ref<'AM' | 'PM'>('AM')
 const showPhotoDialog = ref(false)
 const viewingPhoto = ref<string | null>(null)
 
@@ -358,21 +362,59 @@ function openEditRecord(historyItem: any, recordIndex: number) {
       index: recordIndex,
       record: { ...record }
     }
+    
+    // Parse the time string to get hours, minutes, period
+    const parsed = parseTimeString(record.time)
+    editRecordHours.value = parsed.hours
+    editRecordMinutes.value = parsed.minutes
+    editRecordPeriod.value = parsed.period
+    
     showRecordDialog.value = true
   }
 }
 
 function saveRecord() {
   if (selectedWorkerId.value && editingRecord.value) {
+    // Build time string from components
+    const time12h = `${editRecordHours.value}:${editRecordMinutes.value.toString().padStart(2, '0')} ${editRecordPeriod.value}`
+    
+    // Update timestamp
+    let hours24 = editRecordHours.value
+    if (editRecordPeriod.value === 'AM' && hours24 === 12) hours24 = 0
+    else if (editRecordPeriod.value === 'PM' && hours24 !== 12) hours24 += 12
+    
+    const timestamp = new Date(editingRecord.value.date + 'T' + hours24.toString().padStart(2, '0') + ':' + editRecordMinutes.value.toString().padStart(2, '0') + ':00').getTime()
+    
+    const updatedRecord = {
+      ...editingRecord.value.record,
+      time: time12h,
+      timestamp
+    }
+    
     tracker.updateRecord(
       selectedWorkerId.value,
       editingRecord.value.date,
       editingRecord.value.index,
-      editingRecord.value.record
+      updatedRecord
     )
     showRecordDialog.value = false
     toast.add({ severity: 'success', summary: 'Guardado', detail: 'Registro actualizado', life: 3000 })
   }
+}
+
+function confirmDeleteDay(day: any) {
+  confirm.require({
+    message: `¿Eliminar todos los registros del día ${day.dateFormatted}?`,
+    header: 'Eliminar día completo',
+    icon: 'pi pi-exclamation-triangle',
+    acceptClass: 'p-button-danger',
+    accept: () => {
+      if (selectedWorkerId.value) {
+        tracker.deleteDay(selectedWorkerId.value, day.date)
+        toast.add({ severity: 'info', summary: 'Eliminado', detail: 'Día eliminado del historial', life: 3000 })
+      }
+    }
+  })
 }
 
 function deleteRecord(historyItem: any, recordIndex: number) {
@@ -1034,6 +1076,14 @@ function getRequestTypeLabel(type: string): string {
                   <span class="history-date">{{ day.dateFormatted }}</span>
                   <span class="history-hours">{{ day.hoursWorked }}</span>
                   <Tag :severity="day.statusSeverity as any" :value="day.status" />
+                  <Button 
+                    icon="pi pi-trash" 
+                    text 
+                    severity="danger"
+                    size="small"
+                    v-tooltip.top="'Eliminar día completo'"
+                    @click="confirmDeleteDay(day)"
+                  />
                 </div>
                 <div class="history-records">
                   <div 
@@ -1431,7 +1481,7 @@ function getRequestTypeLabel(type: string): string {
       v-model:visible="showRecordDialog" 
       header="Editar Registro"
       modal
-      :style="{ width: '350px' }"
+      :style="{ width: '400px' }"
     >
       <div v-if="editingRecord" class="dialog-form">
         <div class="field">
@@ -1451,7 +1501,30 @@ function getRequestTypeLabel(type: string): string {
         </div>
         <div class="field">
           <label>Hora</label>
-          <InputText v-model="editingRecord.record.time" fluid placeholder="ej: 9:00 AM" />
+          <div class="time-input-group">
+            <InputNumber 
+              v-model="editRecordHours" 
+              :min="1" 
+              :max="12" 
+              showButtons 
+              buttonLayout="horizontal"
+              :inputStyle="{ width: '60px', textAlign: 'center' }"
+            />
+            <span class="time-separator">:</span>
+            <InputNumber 
+              v-model="editRecordMinutes" 
+              :min="0" 
+              :max="59" 
+              showButtons 
+              buttonLayout="horizontal"
+              :inputStyle="{ width: '60px', textAlign: 'center' }"
+            />
+            <Select
+              v-model="editRecordPeriod"
+              :options="['AM', 'PM']"
+              class="period-select"
+            />
+          </div>
         </div>
       </div>
       <template #footer>
@@ -2325,6 +2398,33 @@ function getRequestTypeLabel(type: string): string {
   color: var(--text-secondary);
   font-style: italic;
   padding: 0.5rem 0;
+}
+
+/* Time input group for editing records */
+.time-input-group {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.time-separator {
+  font-size: 1.25rem;
+  font-weight: bold;
+  color: var(--text-primary);
+}
+
+.period-select {
+  min-width: 80px;
+}
+
+.time-input-group :deep(.p-inputnumber) {
+  width: auto;
+}
+
+.time-input-group :deep(.p-inputnumber-input) {
+  width: 60px !important;
+  text-align: center;
 }
 </style>
 

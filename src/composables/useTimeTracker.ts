@@ -569,18 +569,27 @@ export function useTimeTracker() {
   ): Promise<EditRequest> {
     const id = generateId()
     const now = Date.now()
+    
+    // Crear el objeto base sin campos undefined (Firebase no los acepta)
     const request: EditRequest = {
       id,
       workerId,
       date,
       recordIndex,
       requestType,
-      currentValue: currentValue || undefined,
-      requestedValue: requestedValue || undefined,
       reason,
       status: 'pending',
       createdAt: now
     }
+    
+    // Solo agregar campos opcionales si tienen valor
+    if (currentValue !== undefined) {
+      request.currentValue = currentValue
+    }
+    if (requestedValue !== undefined) {
+      request.requestedValue = requestedValue
+    }
+    
     await setDoc(doc(db, 'editRequests', id), request)
     return request
   }
@@ -812,9 +821,11 @@ export function useTimeTracker() {
     for (const day of ws.history) {
       const dayTimestamp = new Date(day.date + 'T12:00:00').getTime()
       if (dayTimestamp >= startTimestamp && dayTimestamp <= endTimestamp && !processedDates.has(day.date)) {
-        minutesWorked += day.totalMinutes
-        // Contar como día trabajado si tiene registros (aunque totalMinutes sea 0 por bug de timestamp)
-        if (day.records && day.records.length > 0) {
+        // Recalcular minutos directamente de los registros para evitar datos corruptos
+        const actualMinutes = calculateMinutes(day.records || [])
+        minutesWorked += actualMinutes
+        // Contar como día trabajado solo si tiene registros válidos y minutos > 0
+        if (day.records && day.records.length > 0 && actualMinutes > 0) {
           daysWorked++
           // Si no es día de vacaciones, cuenta para el subsidio de transporte
           if (!vacationDatesInPeriod.has(day.date)) {
@@ -1267,13 +1278,18 @@ export function useTimeTracker() {
 
     // Check if it's a new day
     if (!state.currentDay || state.currentDay.date !== today) {
-      // Save old day to history if it had records AND wasn't already saved (no end record means it wasn't saved)
+      // Save old day to history if it had records
       if (state.currentDay && state.currentDay.records.length > 0) {
-        const wasAlreadySaved = state.currentDay.records.some(r => r.type === 'end')
-        if (!wasAlreadySaved) {
-          // Calculate total minutes for incomplete day
-          state.currentDay.totalMinutes = calculateMinutes(state.currentDay.records)
-          state.history.push(state.currentDay)
+        // Calculate total minutes for incomplete day
+        state.currentDay.totalMinutes = calculateMinutes(state.currentDay.records)
+        
+        // Check if this day already exists in history (avoid duplicates)
+        const existingIndex = state.history.findIndex(d => d.date === state.currentDay!.date)
+        if (existingIndex !== -1) {
+          // Update existing entry instead of adding duplicate
+          state.history[existingIndex] = { ...state.currentDay }
+        } else {
+          state.history.push({ ...state.currentDay })
         }
       }
       state.currentDay = { date: today!, records: [], totalMinutes: 0 }
@@ -1284,7 +1300,15 @@ export function useTimeTracker() {
     if (type === 'end') {
       // Calculate total minutes for the day that's ending
       state.currentDay.totalMinutes = calculateMinutes(state.currentDay.records)
-      state.history.push({ ...state.currentDay })
+      
+      // Check if this day already exists in history (avoid duplicates)
+      const existingIndex = state.history.findIndex(d => d.date === state.currentDay!.date)
+      if (existingIndex !== -1) {
+        // Update existing entry instead of adding duplicate
+        state.history[existingIndex] = { ...state.currentDay }
+      } else {
+        state.history.push({ ...state.currentDay })
+      }
     }
 
     await setDoc(doc(db, 'workerStates', workerId), state)
@@ -1595,6 +1619,32 @@ export function useTimeTracker() {
     workerStates.value[workerId] = state
   }
 
+  // Eliminar un día completo del historial
+  async function deleteDay(workerId: string, date: string) {
+    const currentState = workerStates.value[workerId]
+    if (!currentState) return
+
+    // Create a deep copy to ensure reactivity
+    const state: WorkerState = JSON.parse(JSON.stringify(currentState))
+    const today = getTodayDateString()
+
+    // Remove from history
+    const historyIndex = state.history.findIndex(d => d.date === date)
+    if (historyIndex !== -1) {
+      state.history.splice(historyIndex, 1)
+    }
+    
+    // If it's today's currentDay, also clear that
+    if (state.currentDay?.date === date && date === today) {
+      state.currentDay = null
+    }
+    
+    await setDoc(doc(db, 'workerStates', workerId), state)
+    
+    // Force local update
+    workerStates.value[workerId] = state
+  }
+
   function calculateMinutes(records: TimeRecord[]): number {
     let total = 0
     let workStart: number | null = null
@@ -1669,6 +1719,7 @@ export function useTimeTracker() {
     addRecordToDate,
     updateRecord,
     deleteRecord,
+    deleteDay,
     cleanupStaleCurrentDay,
     resetCurrentDay,
     // Stats
