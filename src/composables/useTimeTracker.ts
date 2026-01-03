@@ -1326,7 +1326,6 @@ export function useTimeTracker() {
     if (!currentState) return
     
     const state: WorkerState = JSON.parse(JSON.stringify(currentState))
-    const today = getTodayDateString()
     
     const record: TimeRecord = {
       type,
@@ -1335,14 +1334,24 @@ export function useTimeTracker() {
       photo: photo || null
     }
     
-    // If adding to today and currentDay is today
-    if (date === today && state.currentDay?.date === today) {
+    // Check if the date exists in currentDay first
+    if (state.currentDay?.date === date) {
+      // Add to currentDay
       state.currentDay.records.push(record)
-      // Sort by timestamp
       state.currentDay.records.sort((a, b) => a.timestamp - b.timestamp)
       state.currentDay.totalMinutes = calculateMinutes(state.currentDay.records)
+      
+      // If adding 'end', also save to history
+      if (type === 'end') {
+        const existingIndex = state.history.findIndex(d => d.date === date)
+        if (existingIndex !== -1) {
+          state.history[existingIndex] = { ...state.currentDay }
+        } else {
+          state.history.push({ ...state.currentDay })
+        }
+      }
     } else {
-      // Adding to history (past date or future date)
+      // Check if date exists in history
       let dayLog = state.history.find(d => d.date === date)
       
       if (!dayLog) {
@@ -1356,7 +1365,6 @@ export function useTimeTracker() {
       }
       
       dayLog.records.push(record)
-      // Sort by timestamp
       dayLog.records.sort((a, b) => a.timestamp - b.timestamp)
       dayLog.totalMinutes = calculateMinutes(dayLog.records)
     }
@@ -1572,9 +1580,8 @@ export function useTimeTracker() {
     const newState: WorkerState = JSON.parse(JSON.stringify(currentState))
     
     let updated = false
-    const today = getTodayDateString()
     
-    // First check if date exists in history - history takes priority for past dates
+    // First check if date exists in history
     const dayLogIndex = newState.history.findIndex(d => d.date === date)
     
     if (dayLogIndex !== -1) {
@@ -1588,7 +1595,8 @@ export function useTimeTracker() {
         dayLog.totalMinutes = calculateMinutes(dayLog.records)
         updated = true
       }
-    } else if (newState.currentDay?.date === date && date === today) {
+    } else if (newState.currentDay?.date === date) {
+      // Check currentDay regardless of whether it's today (could be stale)
       const record = newState.currentDay.records[recordIndex]
       if (record) {
         if (updates.type !== undefined) record.type = updates.type
@@ -1612,17 +1620,16 @@ export function useTimeTracker() {
 
     // Create a deep copy to ensure reactivity
     const state: WorkerState = JSON.parse(JSON.stringify(currentState))
-    const today = getTodayDateString()
 
-    // IMPORTANT: First check if date exists in history - history takes priority for past dates
+    // First check if date exists in history
     const dayLog = state.history.find(d => d.date === date)
     
     if (dayLog) {
       // Date found in history - delete from there
       dayLog.records.splice(recordIndex, 1)
       dayLog.totalMinutes = calculateMinutes(dayLog.records)
-    } else if (state.currentDay?.date === date && date === today) {
-      // Only use currentDay if date is TODAY and not found in history
+    } else if (state.currentDay?.date === date) {
+      // Check currentDay regardless of whether it's today (could be stale)
       state.currentDay.records.splice(recordIndex, 1)
       state.currentDay.totalMinutes = calculateMinutes(state.currentDay.records)
     }
